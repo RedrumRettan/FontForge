@@ -133,7 +133,7 @@ function renderGlyph(
   fontSize: number,
   color: string,
   nativeColors: boolean,
-): GlyphRender | null {
+): Promise<GlyphRender | null> {
   // Oversized canvas so glyphs with extreme descenders/ascenders fit
   const margin = Math.ceil(fontSize * 1.5);
   const cw = Math.ceil(fontSize * 3);
@@ -291,7 +291,7 @@ export function useFontConverter() {
       let globalDescent = 0;  // max pixels below baseline
 
       for (const char of chars) {
-        const render = renderGlyph(char, fontFamily, fontSize, color, useNativeColors);
+        const render = await renderGlyph(char, fontFamily, fontSize, color, useNativeColors);
         const xadvance = Math.round(mCtx.measureText(char).width);
 
         if (render) {
@@ -458,3 +458,4 @@ export function useFontConverter() {
     previewFontFamily: fontFamilyRef.current,
   };
 }
+
