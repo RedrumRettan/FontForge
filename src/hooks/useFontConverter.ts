@@ -14,7 +14,7 @@ interface LoadedFont {
 async function parseFontTables(file: File): Promise<FontTableInfo> {
   const empty: FontTableInfo = {
     hasSVG: false, hasGPOS: false, hasGSUB: false, hasOS2: false,
-    hasCFF: false, hasCFF2: false, hasCOLR: false, rawTables: [],
+    hasCFF: false, hasCFF2: false, hasCOLR: false, hasCBDT: false, hasSBIX: false, rawTables: [],
   };
   try {
     const buffer = await file.arrayBuffer();
@@ -48,6 +48,8 @@ async function parseFontTables(file: File): Promise<FontTableInfo> {
       hasCFF:  tableTags.has('CFF '),
       hasCFF2: tableTags.has('CFF2'),
       hasCOLR: tableTags.has('COLR'),
+      hasCBDT: tableTags.has('CBDT') || tableTags.has('CBLC'),
+      hasSBIX: tableTags.has('sbix'),
       rawTables,
     };
   } catch (e) {
@@ -113,11 +115,9 @@ function renderGlyph(
   ctx.font = `${fontSize}px "${fontFamily}"`;
   ctx.textBaseline = 'alphabetic';
 
-  if (!nativeColors) {
-    ctx.fillStyle = color;
-  }
-  // When nativeColors=true, leave fillStyle at default black — the browser
-  // uses the font's embedded color tables automatically.
+  // Use requested tint for monochrome export; for native color fonts we set
+  // white as a neutral fallback while letting embedded palettes render.
+  ctx.fillStyle = nativeColors ? '#ffffff' : color;
 
   ctx.fillText(char, drawX, drawY);
 
@@ -129,9 +129,9 @@ function renderGlyph(
     for (let x = 0; x < cw; x++) {
       const i = (y * cw + x) * 4;
       const a = data[i + 3];
-      // For color fonts: some pixels have r/g/b but low alpha due to
-      // premultiplied alpha or compositing — use a combined check
-      const hasInk = a > 6;
+      // Color fonts can contain low-alpha antialiased edges; include non-zero RGB
+      // so crops keep colored fringes instead of clipping them.
+      const hasInk = a > 6 || (a > 0 && (data[i] > 6 || data[i + 1] > 6 || data[i + 2] > 6));
       if (hasInk) {
         if (x < minX) minX = x;
         if (x > maxX) maxX = x;
@@ -203,7 +203,7 @@ export function useFontConverter() {
         Promise.resolve(detectColorFont(fontFamily)),
       ]);
 
-      const isColorFont = isColorByPixel || tableInfo.hasSVG || tableInfo.hasCOLR;
+      const isColorFont = isColorByPixel || tableInfo.hasSVG || tableInfo.hasCOLR || tableInfo.hasCBDT || tableInfo.hasSBIX;
       console.log('[FontForge] loaded:', cleanName, 'color:', isColorFont, 'tables:', tableInfo.rawTables.join(', '));
 
       setLoadedFont({ name: cleanName, file, objectUrl, isColorFont, tableInfo });

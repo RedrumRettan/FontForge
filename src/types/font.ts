@@ -6,6 +6,8 @@ export interface FontTableInfo {
   hasCFF: boolean;    // CFF (PostScript outlines)
   hasCFF2: boolean;   // CFF2 (variable font PostScript outlines)
   hasCOLR: boolean;   // COLR/CPAL color layers
+  hasCBDT: boolean;   // Bitmap color glyphs (CBDT/CBLC)
+  hasSBIX: boolean;   // Apple bitmap color glyphs (sbix)
   rawTables: string[];
 }
 

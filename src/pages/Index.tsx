@@ -13,6 +13,8 @@ import heroBanner from '@/assets/hero-banner.png';
 const TABLE_LABELS: { key: keyof FontTableInfo; label: string; description: string; color: string }[] = [
   { key: 'hasSVG',  label: 'SVG',  description: 'SVG color glyphs (SVG table)',           color: 'text-pink-400 border-pink-400/30 bg-pink-400/10' },
   { key: 'hasCOLR', label: 'COLR', description: 'Color layers (COLR/CPAL tables)',          color: 'text-purple-400 border-purple-400/30 bg-purple-400/10' },
+  { key: 'hasCBDT', label: 'CBDT', description: 'Bitmap color glyphs (CBDT/CBLC tables)',   color: 'text-fuchsia-400 border-fuchsia-400/30 bg-fuchsia-400/10' },
+  { key: 'hasSBIX', label: 'sbix', description: 'Apple bitmap color glyphs (sbix table)',    color: 'text-rose-400 border-rose-400/30 bg-rose-400/10' },
   { key: 'hasGPOS', label: 'GPOS', description: 'Glyph positioning & kerning (GPOS table)', color: 'text-sky-400 border-sky-400/30 bg-sky-400/10' },
   { key: 'hasGSUB', label: 'GSUB', description: 'Glyph substitution & ligatures (GSUB table)', color: 'text-amber-400 border-amber-400/30 bg-amber-400/10' },
   { key: 'hasOS2',  label: 'OS/2', description: 'OpenType metrics & style data (OS/2 table)', color: 'text-indigo-400 border-indigo-400/30 bg-indigo-400/10' },
