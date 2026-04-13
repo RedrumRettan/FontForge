@@ -13,8 +13,11 @@ import heroBanner from '@/assets/hero-banner.png';
 const TABLE_LABELS: { key: keyof FontTableInfo; label: string; description: string; color: string }[] = [
   { key: 'hasSVG',  label: 'SVG',  description: 'SVG color glyphs (SVG table)',           color: 'text-pink-400 border-pink-400/30 bg-pink-400/10' },
   { key: 'hasCOLR', label: 'COLR', description: 'Color layers (COLR/CPAL tables)',          color: 'text-purple-400 border-purple-400/30 bg-purple-400/10' },
+  { key: 'hasCBDT', label: 'CBDT', description: 'Bitmap color glyphs (CBDT/CBLC tables)',   color: 'text-fuchsia-400 border-fuchsia-400/30 bg-fuchsia-400/10' },
+  { key: 'hasSBIX', label: 'sbix', description: 'Apple bitmap color glyphs (sbix table)',    color: 'text-rose-400 border-rose-400/30 bg-rose-400/10' },
   { key: 'hasGPOS', label: 'GPOS', description: 'Glyph positioning & kerning (GPOS table)', color: 'text-sky-400 border-sky-400/30 bg-sky-400/10' },
   { key: 'hasGSUB', label: 'GSUB', description: 'Glyph substitution & ligatures (GSUB table)', color: 'text-amber-400 border-amber-400/30 bg-amber-400/10' },
+  { key: 'hasOS2',  label: 'OS/2', description: 'OpenType metrics & style data (OS/2 table)', color: 'text-indigo-400 border-indigo-400/30 bg-indigo-400/10' },
   { key: 'hasCFF',  label: 'CFF',  description: 'PostScript/CFF outlines (CFF table)',      color: 'text-emerald-400 border-emerald-400/30 bg-emerald-400/10' },
   { key: 'hasCFF2', label: 'CFF2', description: 'Variable CFF outlines (CFF2 table)',       color: 'text-teal-400 border-teal-400/30 bg-teal-400/10' },
 ];
@@ -57,6 +60,7 @@ const Index = () => {
     downloadFnt,
     downloadAtlas,
     downloadZip,
+    previewFontFamily,
   } = useFontConverter();
 
   const handleFileSelected = async (file: File) => {
@@ -64,9 +68,7 @@ const Index = () => {
     if (res && typeof res === 'object' && 'isColorFont' in res) {
       setIsColorFont(res.isColorFont);
       setTableInfo(res.tableInfo);
-      if (res.isColorFont) {
-        setConfig(prev => ({ ...prev, useNativeColors: true }));
-      }
+      setConfig(prev => ({ ...prev, useNativeColors: res.isColorFont ? true : false }));
     }
   };
 
@@ -209,7 +211,7 @@ const Index = () => {
                 </div>
                 <GlyphPreview
                   result={result}
-                  fontFamily={loadedFont.name}
+                  fontFamily={previewFontFamily ?? loadedFont.name}
                   fontSize={config.fontSize}
                 />
               </section>
