@@ -13,8 +13,8 @@ interface LoadedFont {
 
 async function parseFontTables(file: File): Promise<FontTableInfo> {
   const empty: FontTableInfo = {
-    hasSVG: false, hasGPOS: false, hasGSUB: false,
-    hasCFF: false, hasCFF2: false, hasCOLR: false, rawTables: [],
+    hasSVG: false, hasGPOS: false, hasGSUB: false, hasOS2: false,
+    hasCFF: false, hasCFF2: false, hasCOLR: false, hasCBDT: false, hasSBIX: false, rawTables: [],
   };
   try {
     const buffer = await file.arrayBuffer();
@@ -22,6 +22,7 @@ async function parseFontTables(file: File): Promise<FontTableInfo> {
     if (buffer.byteLength < 12) return empty;
 
     const numTables = view.getUint16(4);
+    const tableTags = new Set<string>();
     const rawTables: string[] = [];
 
     for (let i = 0; i < numTables; i++) {
@@ -33,18 +34,22 @@ async function parseFontTables(file: File): Promise<FontTableInfo> {
         view.getUint8(base + 2),
         view.getUint8(base + 3),
       );
+      tableTags.add(tag);
       rawTables.push(tag.trimEnd());
     }
 
     console.log('[FontForge] tables:', rawTables.join(', '));
 
     return {
-      hasSVG:  rawTables.includes('SVG '),
-      hasGPOS: rawTables.includes('GPOS'),
-      hasGSUB: rawTables.includes('GSUB'),
-      hasCFF:  rawTables.includes('CFF '),
-      hasCFF2: rawTables.includes('CFF2'),
-      hasCOLR: rawTables.includes('COLR'),
+      hasSVG:  tableTags.has('SVG '),
+      hasGPOS: tableTags.has('GPOS'),
+      hasGSUB: tableTags.has('GSUB'),
+      hasOS2:  tableTags.has('OS/2'),
+      hasCFF:  tableTags.has('CFF '),
+      hasCFF2: tableTags.has('CFF2'),
+      hasCOLR: tableTags.has('COLR'),
+      hasCBDT: tableTags.has('CBDT') || tableTags.has('CBLC'),
+      hasSBIX: tableTags.has('sbix'),
       rawTables,
     };
   } catch (e) {
@@ -85,13 +90,59 @@ interface GlyphRender {
   xoffset: number;       // pixels the crop starts to the right of the draw point (can be negative)
 }
 
-function renderGlyph(
+function cropGlyphFromCanvas(
+  ctx: CanvasRenderingContext2D,
+  cw: number,
+  ch: number,
+  drawX: number,
+  drawY: number,
+): GlyphRender | null {
+  const { data } = ctx.getImageData(0, 0, cw, ch);
+  let minX = cw, maxX = -1, minY = ch, maxY = -1;
+
+  for (let y = 0; y < ch; y++) {
+    for (let x = 0; x < cw; x++) {
+      const i = (y * cw + x) * 4;
+      const a = data[i + 3];
+      const hasInk = a > 6 || (a > 0 && (data[i] > 6 || data[i + 1] > 6 || data[i + 2] > 6));
+      if (hasInk) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+
+  if (maxX < 0) return null;
+
+  const cropW = maxX - minX + 1;
+  const cropH = maxY - minY + 1;
+  const cropped = ctx.getImageData(minX, minY, cropW, cropH);
+
+  return {
+    imageData: cropped,
+    ascent: drawY - minY,
+    xoffset: minX - drawX,
+  };
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&apos;');
+}
+
+async function renderGlyph(
   char: string,
   fontFamily: string,
   fontSize: number,
   color: string,
   nativeColors: boolean,
-): GlyphRender | null {
+): Promise<GlyphRender | null> {
   // Oversized canvas so glyphs with extreme descenders/ascenders fit
   const margin = Math.ceil(fontSize * 1.5);
   const cw = Math.ceil(fontSize * 3);
@@ -110,45 +161,47 @@ function renderGlyph(
   ctx.font = `${fontSize}px "${fontFamily}"`;
   ctx.textBaseline = 'alphabetic';
 
-  if (!nativeColors) {
-    ctx.fillStyle = color;
-  }
-  // When nativeColors=true, leave fillStyle at default black — the browser
-  // uses the font's embedded color tables automatically.
+  // Alternate path for native color fonts: render via inline SVG text first.
+  // Some engines preserve COLR/SVG/sbix color glyphs more reliably this way.
+  if (nativeColors) {
+    try {
+      const safeChar = escapeXml(char);
+      const safeFamily = escapeXml(fontFamily);
+      const svg = [
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${cw}" height="${ch}" viewBox="0 0 ${cw} ${ch}">`,
+        `<text x="${drawX}" y="${drawY}" font-family="${safeFamily}" font-size="${fontSize}" text-rendering="optimizeLegibility">${safeChar}</text>`,
+        `</svg>`,
+      ].join('');
 
-  ctx.fillText(char, drawX, drawY);
-
-  // Scan for any ink pixel (alpha OR non-zero RGB for color fonts)
-  const { data } = ctx.getImageData(0, 0, cw, ch);
-  let minX = cw, maxX = -1, minY = ch, maxY = -1;
-
-  for (let y = 0; y < ch; y++) {
-    for (let x = 0; x < cw; x++) {
-      const i = (y * cw + x) * 4;
-      const a = data[i + 3];
-      // For color fonts: some pixels have r/g/b but low alpha due to
-      // premultiplied alpha or compositing — use a combined check
-      const hasInk = a > 6;
-      if (hasInk) {
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
+      const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      try {
+        const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+          const el = new Image();
+          el.onload = () => resolve(el);
+          el.onerror = () => reject(new Error('SVG glyph render failed'));
+          el.src = url;
+        });
+        ctx.clearRect(0, 0, cw, ch);
+        ctx.drawImage(img, 0, 0);
+        const cropped = cropGlyphFromCanvas(ctx, cw, ch, drawX, drawY);
+        if (cropped) {
+          return cropped;
+        }
+      } finally {
+        URL.revokeObjectURL(url);
       }
+    } catch {
+      // fall back to normal canvas text below
     }
   }
 
-  if (maxX < 0) return null; // invisible char (e.g. space)
+  if (!nativeColors) {
+    ctx.fillStyle = color;
+  }
+  ctx.fillText(char, drawX, drawY);
 
-  const cropW = maxX - minX + 1;
-  const cropH = maxY - minY + 1;
-  const cropped = ctx.getImageData(minX, minY, cropW, cropH);
-
-  return {
-    imageData: cropped,
-    ascent: drawY - minY,   // how many px above the baseline the top of the crop sits
-    xoffset: minX - drawX,  // how far right (or left if negative) from nominal draw point
-  };
+  return cropGlyphFromCanvas(ctx, cw, ch, drawX, drawY);
 }
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
@@ -200,7 +253,7 @@ export function useFontConverter() {
         Promise.resolve(detectColorFont(fontFamily)),
       ]);
 
-      const isColorFont = isColorByPixel || tableInfo.hasSVG || tableInfo.hasCOLR;
+      const isColorFont = isColorByPixel || tableInfo.hasSVG || tableInfo.hasCOLR || tableInfo.hasCBDT || tableInfo.hasSBIX;
       console.log('[FontForge] loaded:', cleanName, 'color:', isColorFont, 'tables:', tableInfo.rawTables.join(', '));
 
       setLoadedFont({ name: cleanName, file, objectUrl, isColorFont, tableInfo });
@@ -231,7 +284,8 @@ export function useFontConverter() {
     await new Promise(r => setTimeout(r, 20));
 
     try {
-      const { fontSize, padding, spacing, atlasWidth, atlasHeight, color, useNativeColors } = config;
+      const { fontSize, padding, spacing, atlasWidth, atlasHeight, color } = config;
+      const useNativeColors = config.useNativeColors && !!loadedFont?.isColorFont;
       const chars = CHARSETS[config.charset] ?? config.charset;
 
       // ── 1. Render every glyph and collect global metrics ──────────────────
@@ -253,7 +307,7 @@ export function useFontConverter() {
       let globalDescent = 0;  // max pixels below baseline
 
       for (const char of chars) {
-        const render = renderGlyph(char, fontFamily, fontSize, color, useNativeColors);
+        const render = await renderGlyph(char, fontFamily, fontSize, color, useNativeColors);
         const xadvance = Math.round(mCtx.measureText(char).width);
 
         if (render) {
@@ -407,5 +461,16 @@ export function useFontConverter() {
     setTimeout(downloadAtlas, 350);
   }, [result, downloadFnt, downloadAtlas]);
 
-  return { loadedFont, isConverting, result, error, loadFont, convert, downloadFnt, downloadAtlas, downloadZip };
+  return {
+    loadedFont,
+    isConverting,
+    result,
+    error,
+    loadFont,
+    convert,
+    downloadFnt,
+    downloadAtlas,
+    downloadZip,
+    previewFontFamily: fontFamilyRef.current,
+  };
 }
