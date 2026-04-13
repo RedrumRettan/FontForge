@@ -172,6 +172,16 @@ export function useFontConverter() {
   const fontFamilyRef = useRef<string | null>(null);
   const fontFaceRef = useRef<FontFace | null>(null);
 
+  const ensureFontReady = useCallback(async (family: string, px: number) => {
+    try {
+      await document.fonts.load(`${px}px "${family}"`, 'Aa');
+      await document.fonts.ready;
+      return document.fonts.check(`${px}px "${family}"`, 'Aa');
+    } catch {
+      return false;
+    }
+  }, []);
+
   // ── Load ──────────────────────────────────────────────────────────────────
 
   const loadFont = useCallback(async (file: File) => {
@@ -210,6 +220,11 @@ export function useFontConverter() {
       fontFaceRef.current = ff;
       fontFamilyRef.current = fontFamily;
 
+      const active = await ensureFontReady(fontFamily, 32);
+      if (!active) {
+        throw new Error('FontFace loaded but browser did not activate it');
+      }
+
       const cleanName = file.name.replace(/\.(ttf|otf)$/i, '');
 
       const [tableInfo, isColorByPixel] = await Promise.all([
@@ -228,7 +243,7 @@ export function useFontConverter() {
       URL.revokeObjectURL(objectUrl);
       return false;
     }
-  }, [loadedFont]);
+  }, [loadedFont, ensureFontReady]);
 
   // ── Convert ───────────────────────────────────────────────────────────────
 
@@ -251,6 +266,11 @@ export function useFontConverter() {
       const { fontSize, padding, spacing, atlasWidth, atlasHeight, color } = config;
       const useNativeColors = config.useNativeColors && !!loadedFont?.isColorFont;
       const chars = CHARSETS[config.charset] ?? config.charset;
+
+      const active = await ensureFontReady(fontFamily, fontSize);
+      if (!active) {
+        throw new Error(`Font "${fontFamily}" is not active for rendering`);
+      }
 
       // ── 1. Render every glyph and collect global metrics ──────────────────
 
@@ -392,7 +412,7 @@ export function useFontConverter() {
     } finally {
       setIsConverting(false);
     }
-  }, [loadedFont]);
+  }, [loadedFont, ensureFontReady]);
 
   // ── Downloads ─────────────────────────────────────────────────────────────
 
