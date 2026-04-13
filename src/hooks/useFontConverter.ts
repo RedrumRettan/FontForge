@@ -127,16 +127,7 @@ function cropGlyphFromCanvas(
   };
 }
 
-function escapeXml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&apos;');
-}
-
-async function renderGlyph(
+function renderGlyph(
   char: string,
   fontFamily: string,
   fontSize: number,
@@ -160,41 +151,6 @@ async function renderGlyph(
   ctx.clearRect(0, 0, cw, ch);
   ctx.font = `${fontSize}px "${fontFamily}"`;
   ctx.textBaseline = 'alphabetic';
-
-  // Alternate path for native color fonts: render via inline SVG text first.
-  // Some engines preserve COLR/SVG/sbix color glyphs more reliably this way.
-  if (nativeColors) {
-    try {
-      const safeChar = escapeXml(char);
-      const safeFamily = escapeXml(fontFamily);
-      const svg = [
-        `<svg xmlns="http://www.w3.org/2000/svg" width="${cw}" height="${ch}" viewBox="0 0 ${cw} ${ch}">`,
-        `<text x="${drawX}" y="${drawY}" font-family="${safeFamily}" font-size="${fontSize}" text-rendering="optimizeLegibility">${safeChar}</text>`,
-        `</svg>`,
-      ].join('');
-
-      const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      try {
-        const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-          const el = new Image();
-          el.onload = () => resolve(el);
-          el.onerror = () => reject(new Error('SVG glyph render failed'));
-          el.src = url;
-        });
-        ctx.clearRect(0, 0, cw, ch);
-        ctx.drawImage(img, 0, 0);
-        const cropped = cropGlyphFromCanvas(ctx, cw, ch, drawX, drawY);
-        if (cropped) {
-          return cropped;
-        }
-      } finally {
-        URL.revokeObjectURL(url);
-      }
-    } catch {
-      // fall back to normal canvas text below
-    }
-  }
 
   if (!nativeColors) {
     ctx.fillStyle = color;
