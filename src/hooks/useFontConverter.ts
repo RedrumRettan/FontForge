@@ -152,9 +152,9 @@ function renderGlyph(
   ctx.font = `${fontSize}px "${fontFamily}"`;
   ctx.textBaseline = 'alphabetic';
 
-  if (!nativeColors) {
-    ctx.fillStyle = color;
-  }
+  // Some color-font implementations use "currentColor"/foreground palette entries.
+  // Use white as neutral foreground in native-color mode to avoid default black glyphs.
+  ctx.fillStyle = nativeColors ? '#ffffff' : color;
   ctx.fillText(char, drawX, drawY);
 
   return cropGlyphFromCanvas(ctx, cw, ch, drawX, drawY);
