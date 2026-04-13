@@ -2,6 +2,7 @@ export interface FontTableInfo {
   hasSVG: boolean;    // SVG color table
   hasGPOS: boolean;   // Glyph Positioning
   hasGSUB: boolean;   // Glyph Substitution (ligatures, alternates)
+  hasOS2: boolean;    // OS/2 metrics/weight/embedding table
   hasCFF: boolean;    // CFF (PostScript outlines)
   hasCFF2: boolean;   // CFF2 (variable font PostScript outlines)
   hasCOLR: boolean;   // COLR/CPAL color layers
