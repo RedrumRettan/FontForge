@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from 'react';
 import { FontConversionConfig, ConversionResult, CharGlyph, CHARSETS, FontTableInfo } from '@/types/font';
+import { createNativeFontEngine } from '@/native/fontEngine';
 
 interface LoadedFont {
   name: string;
@@ -9,158 +10,32 @@ interface LoadedFont {
   tableInfo: FontTableInfo;
 }
 
-// ─── Binary table parser ──────────────────────────────────────────────────────
-
-async function parseFontTables(file: File): Promise<FontTableInfo> {
-  const empty: FontTableInfo = {
-    hasSVG: false, hasGPOS: false, hasGSUB: false, hasOS2: false,
-    hasCFF: false, hasCFF2: false, hasCOLR: false, hasCBDT: false, hasSBIX: false, rawTables: [],
-  };
-  try {
-    const buffer = await file.arrayBuffer();
-    const view = new DataView(buffer);
-    if (buffer.byteLength < 12) return empty;
-
-    const numTables = view.getUint16(4);
-    const tableTags = new Set<string>();
-    const rawTables: string[] = [];
-
-    for (let i = 0; i < numTables; i++) {
-      const base = 12 + i * 16;
-      if (base + 4 > buffer.byteLength) break;
-      const tag = String.fromCharCode(
-        view.getUint8(base),
-        view.getUint8(base + 1),
-        view.getUint8(base + 2),
-        view.getUint8(base + 3),
-      );
-      tableTags.add(tag);
-      rawTables.push(tag.trimEnd());
-    }
-
-    console.log('[FontForge] tables:', rawTables.join(', '));
-
-    return {
-      hasSVG:  tableTags.has('SVG '),
-      hasGPOS: tableTags.has('GPOS'),
-      hasGSUB: tableTags.has('GSUB'),
-      hasOS2:  tableTags.has('OS/2'),
-      hasCFF:  tableTags.has('CFF '),
-      hasCFF2: tableTags.has('CFF2'),
-      hasCOLR: tableTags.has('COLR'),
-      hasCBDT: tableTags.has('CBDT') || tableTags.has('CBLC'),
-      hasSBIX: tableTags.has('sbix'),
-      rawTables,
-    };
-  } catch (e) {
-    console.warn('[FontForge] table parse failed:', e);
-    return empty;
-  }
-}
-
-// ─── Color font detection ─────────────────────────────────────────────────────
-
-function detectColorFont(fontFamily: string): boolean {
-  const size = 64;
-  const c = document.createElement('canvas');
-  c.width = size; c.height = size;
-  const ctx = c.getContext('2d', { willReadFrequently: true })!;
-  ctx.font = `48px "${fontFamily}"`;
-  ctx.textBaseline = 'alphabetic';
-  // Don't set fillStyle — let native colors render
-  ctx.fillText('A', 8, 48);
-  const { data } = ctx.getImageData(0, 0, size, size);
-  for (let i = 0; i < data.length; i += 4) {
-    const [r, g, b, a] = [data[i], data[i+1], data[i+2], data[i+3]];
-    if (a > 20) {
-      const avg = (r + g + b) / 3;
-      if (Math.abs(r - avg) > 15 || Math.abs(g - avg) > 15 || Math.abs(b - avg) > 15) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-// ─── Single-glyph renderer ────────────────────────────────────────────────────
-
-interface GlyphRender {
-  imageData: ImageData;  // tight crop of just the ink pixels
-  ascent: number;        // pixels above baseline in the crop
-  xoffset: number;       // pixels the crop starts to the right of the draw point (can be negative)
-}
-
-function cropGlyphFromCanvas(
-  ctx: CanvasRenderingContext2D,
-  cw: number,
-  ch: number,
-  drawX: number,
-  drawY: number,
-): GlyphRender | null {
-  const { data } = ctx.getImageData(0, 0, cw, ch);
-  let minX = cw, maxX = -1, minY = ch, maxY = -1;
-
-  for (let y = 0; y < ch; y++) {
-    for (let x = 0; x < cw; x++) {
-      const i = (y * cw + x) * 4;
-      const a = data[i + 3];
-      const hasInk = a > 6 || (a > 0 && (data[i] > 6 || data[i + 1] > 6 || data[i + 2] > 6));
-      if (hasInk) {
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-      }
-    }
-  }
-
-  if (maxX < 0) return null;
-
-  const cropW = maxX - minX + 1;
-  const cropH = maxY - minY + 1;
-  const cropped = ctx.getImageData(minX, minY, cropW, cropH);
-
-  return {
-    imageData: cropped,
-    ascent: drawY - minY,
-    xoffset: minX - drawX,
+interface FontNativeEngine {
+  getTableInfo(): FontTableInfo;
+  resolveGlyphIndices(codepoints: number[]): number[];
+  metrics(pxSize: number): { ascent: number; descent: number; line_gap: number };
+  glyphMetrics(glyphId: number, pxSize: number): { advance_width: number; left_side_bearing: number };
+  shape(text: string, pxSize: number): Array<{ glyph_id: number; cluster: number }>;
+  rasterizeGlyph(glyphId: number, pxSize: number, colorRgba: number): {
+    width: number;
+    height: number;
+    left: number;
+    top: number;
+    advance_width: number;
+    rgba: Uint8Array;
   };
 }
 
-function renderGlyph(
-  char: string,
-  fontFamily: string,
-  fontSize: number,
-  color: string,
-  nativeColors: boolean,
-): Promise<GlyphRender | null> {
-  // Oversized canvas so glyphs with extreme descenders/ascenders fit
-  const margin = Math.ceil(fontSize * 1.5);
-  const cw = Math.ceil(fontSize * 3);
-  const ch = Math.ceil(fontSize * 3);
-
-  const canvas = document.createElement('canvas');
-  canvas.width = cw;
-  canvas.height = ch;
-  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
-
-  // Baseline sits at 60% down so there's room for ascenders and descenders
-  const drawX = margin;
-  const drawY = Math.round(ch * 0.6);
-
-  ctx.clearRect(0, 0, cw, ch);
-  ctx.font = `${fontSize}px "${fontFamily}"`;
-  ctx.textBaseline = 'alphabetic';
-
-  // Some color-font implementations use "currentColor"/foreground palette entries.
-  // Use white as neutral foreground in native-color mode to avoid default black glyphs.
-  ctx.fillStyle = nativeColors ? '#ffffff' : color;
-  ctx.fillText(char, drawX, drawY);
-
-  return cropGlyphFromCanvas(ctx, cw, ch, drawX, drawY);
+function colorToRgbaInt(color: string): number {
+  const c = document.createElement('canvas').getContext('2d');
+  if (!c) return 0xffffffff;
+  c.fillStyle = color;
+  const resolved = c.fillStyle;
+  const m = /^#([0-9a-f]{6})$/i.exec(resolved);
+  if (!m) return 0xffffffff;
+  const hex = parseInt(m[1], 16);
+  return ((hex << 8) | 0xff) >>> 0;
 }
-
-// ─── Hook ─────────────────────────────────────────────────────────────────────
 
 export function useFontConverter() {
   const [loadedFont, setLoadedFont] = useState<LoadedFont | null>(null);
@@ -168,9 +43,9 @@ export function useFontConverter() {
   const [result, setResult] = useState<ConversionResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Store the FontFace family name (string) so we never capture a stale ref
   const fontFamilyRef = useRef<string | null>(null);
   const fontFaceRef = useRef<FontFace | null>(null);
+  const nativeEngineRef = useRef<FontNativeEngine | null>(null);
 
   const ensureFontReady = useCallback(async (family: string, px: number) => {
     try {
@@ -182,8 +57,6 @@ export function useFontConverter() {
     }
   }, []);
 
-  // ── Load ──────────────────────────────────────────────────────────────────
-
   const loadFont = useCallback(async (file: File) => {
     setError(null);
     setResult(null);
@@ -194,7 +67,6 @@ export function useFontConverter() {
       return false;
     }
 
-    // Clean up previous font
     if (fontFaceRef.current) {
       try { document.fonts.delete(fontFaceRef.current); } catch {}
     }
@@ -206,12 +78,12 @@ export function useFontConverter() {
     const fontFamily = `FF_${Date.now()}`;
 
     try {
-      // Prefer ArrayBuffer source for broader browser reliability when loading
-      // local user-selected fonts. Fall back to object URL if needed.
+      const fontData = new Uint8Array(await file.arrayBuffer());
+      nativeEngineRef.current = await createNativeFontEngine(fontData);
+
       let ff: FontFace;
       try {
-        const fontData = await file.arrayBuffer();
-        ff = new FontFace(fontFamily, fontData);
+        ff = new FontFace(fontFamily, fontData.buffer);
       } catch {
         ff = new FontFace(fontFamily, `url(${objectUrl})`);
       }
@@ -221,200 +93,148 @@ export function useFontConverter() {
       fontFamilyRef.current = fontFamily;
 
       const active = await ensureFontReady(fontFamily, 32);
-      if (!active) {
-        throw new Error('FontFace loaded but browser did not activate it');
-      }
+      if (!active) throw new Error('FontFace loaded but browser did not activate it');
 
       const cleanName = file.name.replace(/\.(ttf|otf)$/i, '');
-
-      const [tableInfo, isColorByPixel] = await Promise.all([
-        parseFontTables(file),
-        Promise.resolve(detectColorFont(fontFamily)),
-      ]);
-
-      const isColorFont = isColorByPixel || tableInfo.hasSVG || tableInfo.hasCOLR || tableInfo.hasCBDT || tableInfo.hasSBIX;
-      console.log('[FontForge] loaded:', cleanName, 'color:', isColorFont, 'tables:', tableInfo.rawTables.join(', '));
+      const tableInfo = nativeEngineRef.current.getTableInfo();
+      const isColorFont = tableInfo.hasSVG || tableInfo.hasCOLR || tableInfo.hasCBDT || tableInfo.hasSBIX;
 
       setLoadedFont({ name: cleanName, file, objectUrl, isColorFont, tableInfo });
       return { fontFamily, isColorFont, tableInfo };
     } catch (e) {
       console.error('[FontForge] load error:', e);
-      setError('Failed to load font. Make sure it is a valid TTF/OTF file.');
+      setError('Failed to load native font engine or font data.');
       URL.revokeObjectURL(objectUrl);
       return false;
     }
   }, [loadedFont, ensureFontReady]);
 
-  // ── Convert ───────────────────────────────────────────────────────────────
-
   const convert = useCallback(async (config: FontConversionConfig) => {
     const fontFamily = fontFamilyRef.current;
     const fontName = loadedFont?.name;
+    const engine = nativeEngineRef.current;
 
-    if (!fontFamily || !fontName) {
+    if (!fontFamily || !fontName || !engine) {
       setError('No font loaded.');
       return;
     }
 
     setIsConverting(true);
     setError(null);
-
-    // Yield to React so the spinner shows
     await new Promise(r => setTimeout(r, 20));
 
     try {
       const { fontSize, padding, spacing, atlasWidth, atlasHeight, color } = config;
-      const useNativeColors = config.useNativeColors && !!loadedFont?.isColorFont;
       const chars = CHARSETS[config.charset] ?? config.charset;
 
       const active = await ensureFontReady(fontFamily, fontSize);
-      if (!active) {
-        throw new Error(`Font "${fontFamily}" is not active for rendering`);
-      }
+      if (!active) throw new Error(`Font "${fontFamily}" is not active for rendering`);
 
-      // ── 1. Render every glyph and collect global metrics ──────────────────
+      const codepoints = Array.from(chars).map((ch) => ch.codePointAt(0) ?? 0);
+      const glyphIds = engine.resolveGlyphIndices(codepoints);
+      const shaped = engine.shape(chars, fontSize);
+      const shapedByCluster = new Map<number, number>();
+      shaped.forEach((g) => shapedByCluster.set(g.cluster, g.glyph_id));
 
-      // Use a shared measure canvas for xadvance (faster than metrics per glyph)
-      const measureCanvas = document.createElement('canvas');
-      const mCtx = measureCanvas.getContext('2d')!;
-      mCtx.font = `${fontSize}px "${fontFamily}"`;
-
-      interface RenderEntry {
-        char: string;
-        id: number;
-        render: GlyphRender | null;
-        xadvance: number;
-      }
-
-      const entries: RenderEntry[] = [];
-      let globalAscent = 0;   // max pixels above baseline across all glyphs
-      let globalDescent = 0;  // max pixels below baseline
-
-      for (const char of chars) {
-        const render = await renderGlyph(char, fontFamily, fontSize, color, useNativeColors);
-        const xadvance = Math.round(mCtx.measureText(char).width);
-
-        if (render) {
-          globalAscent  = Math.max(globalAscent,  render.ascent);
-          // descent = crop height - ascent  (pixels below baseline in the crop)
-          globalDescent = Math.max(globalDescent, render.imageData.height - render.ascent);
-        }
-
-        entries.push({ char, id: char.charCodeAt(0), render, xadvance });
-      }
-
-      // Add 1px slack so descenders don't clip
-      const lineHeight = globalAscent + globalDescent + 1;
+      const fontMetrics = engine.metrics(fontSize);
+      const globalAscent = Math.round(Math.max(0, fontMetrics.ascent));
+      const globalDescent = Math.round(Math.abs(Math.min(0, fontMetrics.descent)));
+      const lineHeight = Math.round(globalAscent + globalDescent + fontMetrics.line_gap);
       const base = globalAscent;
 
-      console.log(`[FontForge] lineHeight=${lineHeight} base=${base} (ascent=${globalAscent} descent=${globalDescent})`);
-
-      // ── 2. Pack glyphs into the atlas canvas ──────────────────────────────
-
       const atlas = document.createElement('canvas');
-      atlas.width  = atlasWidth;
+      atlas.width = atlasWidth;
       atlas.height = atlasHeight;
-      const actx = atlas.getContext('2d')!;
+      const actx = atlas.getContext('2d');
+      if (!actx) throw new Error('No atlas 2D context available');
       actx.clearRect(0, 0, atlasWidth, atlasHeight);
 
       const glyphs: CharGlyph[] = [];
-      let cx = padding;   // cursor x
-      let cy = padding;   // cursor y (top of current row)
-
-      // Each row is tall enough to hold the tallest glyph + padding on both sides
+      let cx = padding;
+      let cy = padding;
       const rowH = lineHeight + padding * 2;
+      const rgbaColor = colorToRgbaInt(color);
 
-      for (const { char, id, render, xadvance } of entries) {
-        if (!render) {
-          // Invisible char (space, zero-width, etc.) — emit with zero size
-          glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
+      for (let i = 0; i < chars.length; i++) {
+        const char = chars[i];
+        const id = codepoints[i];
+        const glyphId = shapedByCluster.get(i) ?? glyphIds[i] ?? 0;
+
+        if (!glyphId) {
+          glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance: 0 });
           continue;
         }
 
-        const gw = render.imageData.width;
-        const gh = render.imageData.height;
+        const gm = engine.glyphMetrics(glyphId, fontSize);
+        const bitmap = engine.rasterizeGlyph(glyphId, fontSize, rgbaColor);
 
-        // Cell width = glyph pixels + padding on each side
+        const gw = bitmap.width;
+        const gh = bitmap.height;
         const cellW = gw + padding * 2;
 
-        // Wrap to next row if needed
         if (cx + cellW > atlasWidth - padding) {
           cx = padding;
           cy += rowH + spacing;
         }
 
         if (cy + rowH > atlasHeight) {
-          console.warn(`[FontForge] atlas full — '${char}' skipped`);
-          // Still push the glyph with 0 coords so the FNT char count is accurate
-          glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
+          glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance: Math.round(gm.advance_width) });
           continue;
         }
 
-        // Where this glyph's pixels land in the atlas
         const atlasX = cx + padding;
-        // Vertically align glyphs to a shared baseline:
-        // top of cell + padding + (globalAscent - this glyph's ascent)
-        const atlasY = cy + padding + (globalAscent - render.ascent);
+        const atlasY = cy + padding + (base - bitmap.top);
 
-        actx.putImageData(render.imageData, atlasX, atlasY);
+        if (gw > 0 && gh > 0) {
+          const imageData = new ImageData(new Uint8ClampedArray(bitmap.rgba), gw, gh);
+          actx.putImageData(imageData, atlasX, atlasY);
+        }
 
         glyphs.push({
           id,
           char,
           x: atlasX,
           y: atlasY,
-          width:  gw,
+          width: gw,
           height: gh,
-          // xoffset: shift applied by the renderer when drawing from cursor
-          // If the glyph pixels start to the right of the draw point, xoffset > 0
-          xoffset: render.xoffset,
-          // yoffset: distance from the top of the line to the top of the glyph crop
-          yoffset: globalAscent - render.ascent,
-          xadvance,
+          xoffset: bitmap.left,
+          yoffset: base - bitmap.top,
+          xadvance: Math.round(gm.advance_width),
         });
 
         cx += cellW + spacing;
       }
 
-      // ── 3. Generate the .fnt text ─────────────────────────────────────────
-
       const lines: string[] = [];
       lines.push(
         `info face="${fontName}" size=${fontSize} bold=0 italic=0 charset="" unicode=1 stretchH=100 smooth=1 aa=1` +
-        ` padding=${padding},${padding},${padding},${padding} spacing=${spacing},${spacing}`
+        ` padding=${padding},${padding},${padding},${padding} spacing=${spacing},${spacing}`,
       );
-      lines.push(
-        `common lineHeight=${lineHeight} base=${base} scaleW=${atlasWidth} scaleH=${atlasHeight} pages=1 packed=0`
-      );
+      lines.push(`common lineHeight=${lineHeight} base=${base} scaleW=${atlasWidth} scaleH=${atlasHeight} pages=1 packed=0`);
       lines.push(`page id=0 file="${fontName}_0.png"`);
       lines.push(`chars count=${glyphs.length}`);
 
       for (const g of glyphs) {
         lines.push(
-          `char id=${g.id} ` +
-          `x=${g.x} y=${g.y} ` +
-          `width=${g.width} height=${g.height} ` +
-          `xoffset=${g.xoffset} yoffset=${g.yoffset} ` +
-          `xadvance=${g.xadvance} page=0 chnl=15`
+          `char id=${g.id} x=${g.x} y=${g.y} width=${g.width} height=${g.height} xoffset=${g.xoffset} yoffset=${g.yoffset} xadvance=${g.xadvance} page=0 chnl=15`,
         );
       }
 
-      const fntContent = lines.join('\n');
-      const atlasDataUrl = atlas.toDataURL('image/png');
-
-      const packed = glyphs.filter(g => g.width > 0).length;
-      console.log(`[FontForge] done — ${packed}/${glyphs.length} glyphs packed`);
-
-      setResult({ fntContent, atlasDataUrl, glyphs, fontName, lineHeight, base });
+      setResult({
+        fntContent: lines.join('\n'),
+        atlasDataUrl: atlas.toDataURL('image/png'),
+        glyphs,
+        fontName,
+        lineHeight,
+        base,
+      });
     } catch (e) {
       console.error('[FontForge] convert error:', e);
-      setError('Conversion failed — check the browser console for details.');
+      setError('Conversion failed — check native module availability and console logs.');
     } finally {
       setIsConverting(false);
     }
   }, [loadedFont, ensureFontReady]);
-
-  // ── Downloads ─────────────────────────────────────────────────────────────
 
   const downloadFnt = useCallback(() => {
     if (!result) return;
@@ -458,4 +278,3 @@ export function useFontConverter() {
     previewFontFamily: fontFamilyRef.current,
   };
 }
-
