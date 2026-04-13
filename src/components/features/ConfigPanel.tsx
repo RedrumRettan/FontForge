@@ -206,6 +206,7 @@ export function ConfigPanel({ config, onChange, isColorFont = false }: ConfigPan
         </div>
         <Switch
           checked={config.useNativeColors}
+          disabled={!isColorFont}
           onCheckedChange={(v) => update({ useNativeColors: v })}
         />
       </div>
