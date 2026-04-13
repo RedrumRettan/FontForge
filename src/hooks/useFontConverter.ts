@@ -232,7 +232,6 @@ export function useFontConverter() {
 
     try {
       const { fontSize, padding, spacing, atlasWidth, atlasHeight, color } = config;
-      const useNativeColors = config.useNativeColors && !!loadedFont?.isColorFont;
       const chars = CHARSETS[config.charset] ?? config.charset;
 
       const active = await ensureFontReady(fontFamily, fontSize);
@@ -357,7 +356,7 @@ export function useFontConverter() {
       setResult({ fntContent: lines.join('\n'), atlasDataUrl: atlas.toDataURL('image/png'), glyphs, fontName, lineHeight, base });
     } catch (e) {
       console.error('[FontForge] convert error:', e);
-      setError('Conversion failed — check the browser console for details.');
+      setError('Conversion failed — check native module availability and console logs.');
     } finally {
       setIsConverting(false);
     }
