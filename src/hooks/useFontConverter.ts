@@ -240,7 +240,15 @@ export function useFontConverter() {
     const fontFamily = `FF_${Date.now()}`;
 
     try {
-      const ff = new FontFace(fontFamily, `url(${objectUrl})`);
+      // Prefer ArrayBuffer source for broader browser reliability when loading
+      // local user-selected fonts. Fall back to object URL if needed.
+      let ff: FontFace;
+      try {
+        const fontData = await file.arrayBuffer();
+        ff = new FontFace(fontFamily, fontData);
+      } catch {
+        ff = new FontFace(fontFamily, `url(${objectUrl})`);
+      }
       await ff.load();
       document.fonts.add(ff);
       fontFaceRef.current = ff;
