@@ -68,9 +68,7 @@ const Index = () => {
     if (res && typeof res === 'object' && 'isColorFont' in res) {
       setIsColorFont(res.isColorFont);
       setTableInfo(res.tableInfo);
-      if (res.isColorFont) {
-        setConfig(prev => ({ ...prev, useNativeColors: true }));
-      }
+      setConfig(prev => ({ ...prev, useNativeColors: res.isColorFont ? true : false }));
     }
   };
 

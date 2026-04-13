@@ -115,9 +115,11 @@ function renderGlyph(
   ctx.font = `${fontSize}px "${fontFamily}"`;
   ctx.textBaseline = 'alphabetic';
 
-  // Use requested tint for monochrome export; for native color fonts we set
-  // white as a neutral fallback while letting embedded palettes render.
-  ctx.fillStyle = nativeColors ? '#ffffff' : color;
+  // For monochrome export, force tint color. For native color fonts, do not
+  // override fillStyle so embedded palette/SVG rendering can be used by browser.
+  if (!nativeColors) {
+    ctx.fillStyle = color;
+  }
 
   ctx.fillText(char, drawX, drawY);
 
@@ -234,7 +236,8 @@ export function useFontConverter() {
     await new Promise(r => setTimeout(r, 20));
 
     try {
-      const { fontSize, padding, spacing, atlasWidth, atlasHeight, color, useNativeColors } = config;
+      const { fontSize, padding, spacing, atlasWidth, atlasHeight, color } = config;
+      const useNativeColors = config.useNativeColors && !!loadedFont?.isColorFont;
       const chars = CHARSETS[config.charset] ?? config.charset;
 
       // ── 1. Render every glyph and collect global metrics ──────────────────
