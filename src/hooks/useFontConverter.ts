@@ -13,8 +13,8 @@ interface LoadedFont {
 
 async function parseFontTables(file: File): Promise<FontTableInfo> {
   const empty: FontTableInfo = {
-    hasSVG: false, hasGPOS: false, hasGSUB: false,
-    hasCFF: false, hasCFF2: false, hasCOLR: false, rawTables: [],
+    hasSVG: false, hasGPOS: false, hasGSUB: false, hasOS2: false,
+    hasCFF: false, hasCFF2: false, hasCOLR: false, hasCBDT: false, hasSBIX: false, rawTables: [],
   };
   try {
     const buffer = await file.arrayBuffer();
@@ -22,6 +22,7 @@ async function parseFontTables(file: File): Promise<FontTableInfo> {
     if (buffer.byteLength < 12) return empty;
 
     const numTables = view.getUint16(4);
+    const tableTags = new Set<string>();
     const rawTables: string[] = [];
 
     for (let i = 0; i < numTables; i++) {
@@ -33,18 +34,22 @@ async function parseFontTables(file: File): Promise<FontTableInfo> {
         view.getUint8(base + 2),
         view.getUint8(base + 3),
       );
+      tableTags.add(tag);
       rawTables.push(tag.trimEnd());
     }
 
     console.log('[FontForge] tables:', rawTables.join(', '));
 
     return {
-      hasSVG:  rawTables.includes('SVG '),
-      hasGPOS: rawTables.includes('GPOS'),
-      hasGSUB: rawTables.includes('GSUB'),
-      hasCFF:  rawTables.includes('CFF '),
-      hasCFF2: rawTables.includes('CFF2'),
-      hasCOLR: rawTables.includes('COLR'),
+      hasSVG:  tableTags.has('SVG '),
+      hasGPOS: tableTags.has('GPOS'),
+      hasGSUB: tableTags.has('GSUB'),
+      hasOS2:  tableTags.has('OS/2'),
+      hasCFF:  tableTags.has('CFF '),
+      hasCFF2: tableTags.has('CFF2'),
+      hasCOLR: tableTags.has('COLR'),
+      hasCBDT: tableTags.has('CBDT') || tableTags.has('CBLC'),
+      hasSBIX: tableTags.has('sbix'),
       rawTables,
     };
   } catch (e) {
@@ -85,6 +90,43 @@ interface GlyphRender {
   xoffset: number;       // pixels the crop starts to the right of the draw point (can be negative)
 }
 
+function cropGlyphFromCanvas(
+  ctx: CanvasRenderingContext2D,
+  cw: number,
+  ch: number,
+  drawX: number,
+  drawY: number,
+): GlyphRender | null {
+  const { data } = ctx.getImageData(0, 0, cw, ch);
+  let minX = cw, maxX = -1, minY = ch, maxY = -1;
+
+  for (let y = 0; y < ch; y++) {
+    for (let x = 0; x < cw; x++) {
+      const i = (y * cw + x) * 4;
+      const a = data[i + 3];
+      const hasInk = a > 6 || (a > 0 && (data[i] > 6 || data[i + 1] > 6 || data[i + 2] > 6));
+      if (hasInk) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+
+  if (maxX < 0) return null;
+
+  const cropW = maxX - minX + 1;
+  const cropH = maxY - minY + 1;
+  const cropped = ctx.getImageData(minX, minY, cropW, cropH);
+
+  return {
+    imageData: cropped,
+    ascent: drawY - minY,
+    xoffset: minX - drawX,
+  };
+}
+
 function renderGlyph(
   char: string,
   fontFamily: string,
@@ -113,42 +155,9 @@ function renderGlyph(
   if (!nativeColors) {
     ctx.fillStyle = color;
   }
-  // When nativeColors=true, leave fillStyle at default black — the browser
-  // uses the font's embedded color tables automatically.
-
   ctx.fillText(char, drawX, drawY);
 
-  // Scan for any ink pixel (alpha OR non-zero RGB for color fonts)
-  const { data } = ctx.getImageData(0, 0, cw, ch);
-  let minX = cw, maxX = -1, minY = ch, maxY = -1;
-
-  for (let y = 0; y < ch; y++) {
-    for (let x = 0; x < cw; x++) {
-      const i = (y * cw + x) * 4;
-      const a = data[i + 3];
-      // For color fonts: some pixels have r/g/b but low alpha due to
-      // premultiplied alpha or compositing — use a combined check
-      const hasInk = a > 6;
-      if (hasInk) {
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-      }
-    }
-  }
-
-  if (maxX < 0) return null; // invisible char (e.g. space)
-
-  const cropW = maxX - minX + 1;
-  const cropH = maxY - minY + 1;
-  const cropped = ctx.getImageData(minX, minY, cropW, cropH);
-
-  return {
-    imageData: cropped,
-    ascent: drawY - minY,   // how many px above the baseline the top of the crop sits
-    xoffset: minX - drawX,  // how far right (or left if negative) from nominal draw point
-  };
+  return cropGlyphFromCanvas(ctx, cw, ch, drawX, drawY);
 }
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
@@ -162,6 +171,16 @@ export function useFontConverter() {
   // Store the FontFace family name (string) so we never capture a stale ref
   const fontFamilyRef = useRef<string | null>(null);
   const fontFaceRef = useRef<FontFace | null>(null);
+
+  const ensureFontReady = useCallback(async (family: string, px: number) => {
+    try {
+      await document.fonts.load(`${px}px "${family}"`, 'Aa');
+      await document.fonts.ready;
+      return document.fonts.check(`${px}px "${family}"`, 'Aa');
+    } catch {
+      return false;
+    }
+  }, []);
 
   // ── Load ──────────────────────────────────────────────────────────────────
 
@@ -187,11 +206,24 @@ export function useFontConverter() {
     const fontFamily = `FF_${Date.now()}`;
 
     try {
-      const ff = new FontFace(fontFamily, `url(${objectUrl})`);
+      // Prefer ArrayBuffer source for broader browser reliability when loading
+      // local user-selected fonts. Fall back to object URL if needed.
+      let ff: FontFace;
+      try {
+        const fontData = await file.arrayBuffer();
+        ff = new FontFace(fontFamily, fontData);
+      } catch {
+        ff = new FontFace(fontFamily, `url(${objectUrl})`);
+      }
       await ff.load();
       document.fonts.add(ff);
       fontFaceRef.current = ff;
       fontFamilyRef.current = fontFamily;
+
+      const active = await ensureFontReady(fontFamily, 32);
+      if (!active) {
+        throw new Error('FontFace loaded but browser did not activate it');
+      }
 
       const cleanName = file.name.replace(/\.(ttf|otf)$/i, '');
 
@@ -200,7 +232,7 @@ export function useFontConverter() {
         Promise.resolve(detectColorFont(fontFamily)),
       ]);
 
-      const isColorFont = isColorByPixel || tableInfo.hasSVG || tableInfo.hasCOLR;
+      const isColorFont = isColorByPixel || tableInfo.hasSVG || tableInfo.hasCOLR || tableInfo.hasCBDT || tableInfo.hasSBIX;
       console.log('[FontForge] loaded:', cleanName, 'color:', isColorFont, 'tables:', tableInfo.rawTables.join(', '));
 
       setLoadedFont({ name: cleanName, file, objectUrl, isColorFont, tableInfo });
@@ -211,7 +243,7 @@ export function useFontConverter() {
       URL.revokeObjectURL(objectUrl);
       return false;
     }
-  }, [loadedFont]);
+  }, [loadedFont, ensureFontReady]);
 
   // ── Convert ───────────────────────────────────────────────────────────────
 
@@ -231,8 +263,14 @@ export function useFontConverter() {
     await new Promise(r => setTimeout(r, 20));
 
     try {
-      const { fontSize, padding, spacing, atlasWidth, atlasHeight, color, useNativeColors } = config;
+      const { fontSize, padding, spacing, atlasWidth, atlasHeight, color } = config;
+      const useNativeColors = config.useNativeColors && !!loadedFont?.isColorFont;
       const chars = CHARSETS[config.charset] ?? config.charset;
+
+      const active = await ensureFontReady(fontFamily, fontSize);
+      if (!active) {
+        throw new Error(`Font "${fontFamily}" is not active for rendering`);
+      }
 
       // ── 1. Render every glyph and collect global metrics ──────────────────
 
@@ -374,7 +412,7 @@ export function useFontConverter() {
     } finally {
       setIsConverting(false);
     }
-  }, [loadedFont]);
+  }, [loadedFont, ensureFontReady]);
 
   // ── Downloads ─────────────────────────────────────────────────────────────
 
@@ -407,5 +445,16 @@ export function useFontConverter() {
     setTimeout(downloadAtlas, 350);
   }, [result, downloadFnt, downloadAtlas]);
 
-  return { loadedFont, isConverting, result, error, loadFont, convert, downloadFnt, downloadAtlas, downloadZip };
+  return {
+    loadedFont,
+    isConverting,
+    result,
+    error,
+    loadFont,
+    convert,
+    downloadFnt,
+    downloadAtlas,
+    downloadZip,
+    previewFontFamily: fontFamilyRef.current,
+  };
 }
