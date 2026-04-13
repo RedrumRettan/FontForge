@@ -13,7 +13,7 @@ interface LoadedFont {
 
 async function parseFontTables(file: File): Promise<FontTableInfo> {
   const empty: FontTableInfo = {
-    hasSVG: false, hasGPOS: false, hasGSUB: false,
+    hasSVG: false, hasGPOS: false, hasGSUB: false, hasOS2: false,
     hasCFF: false, hasCFF2: false, hasCOLR: false, rawTables: [],
   };
   try {
@@ -22,6 +22,7 @@ async function parseFontTables(file: File): Promise<FontTableInfo> {
     if (buffer.byteLength < 12) return empty;
 
     const numTables = view.getUint16(4);
+    const tableTags = new Set<string>();
     const rawTables: string[] = [];
 
     for (let i = 0; i < numTables; i++) {
@@ -33,18 +34,20 @@ async function parseFontTables(file: File): Promise<FontTableInfo> {
         view.getUint8(base + 2),
         view.getUint8(base + 3),
       );
+      tableTags.add(tag);
       rawTables.push(tag.trimEnd());
     }
 
     console.log('[FontForge] tables:', rawTables.join(', '));
 
     return {
-      hasSVG:  rawTables.includes('SVG '),
-      hasGPOS: rawTables.includes('GPOS'),
-      hasGSUB: rawTables.includes('GSUB'),
-      hasCFF:  rawTables.includes('CFF '),
-      hasCFF2: rawTables.includes('CFF2'),
-      hasCOLR: rawTables.includes('COLR'),
+      hasSVG:  tableTags.has('SVG '),
+      hasGPOS: tableTags.has('GPOS'),
+      hasGSUB: tableTags.has('GSUB'),
+      hasOS2:  tableTags.has('OS/2'),
+      hasCFF:  tableTags.has('CFF '),
+      hasCFF2: tableTags.has('CFF2'),
+      hasCOLR: tableTags.has('COLR'),
       rawTables,
     };
   } catch (e) {
@@ -407,5 +410,17 @@ export function useFontConverter() {
     setTimeout(downloadAtlas, 350);
   }, [result, downloadFnt, downloadAtlas]);
 
-  return { loadedFont, isConverting, result, error, loadFont, convert, downloadFnt, downloadAtlas, downloadZip };
+  return {
+    loadedFont,
+    isConverting,
+    result,
+    error,
+    loadFont,
+    convert,
+    downloadFnt,
+    downloadAtlas,
+    downloadZip,
+    previewFontFamily: fontFamilyRef.current,
+  };
 }
+
