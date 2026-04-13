@@ -57,6 +57,7 @@ const Index = () => {
     downloadFnt,
     downloadAtlas,
     downloadZip,
+    previewFontFamily,
   } = useFontConverter();
 
   const handleFileSelected = async (file: File) => {
@@ -209,7 +210,7 @@ const Index = () => {
                 </div>
                 <GlyphPreview
                   result={result}
-                  fontFamily={loadedFont.name}
+                  fontFamily={previewFontFamily ?? loadedFont.name}
                   fontSize={config.fontSize}
                 />
               </section>

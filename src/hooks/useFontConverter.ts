@@ -407,5 +407,17 @@ export function useFontConverter() {
     setTimeout(downloadAtlas, 350);
   }, [result, downloadFnt, downloadAtlas]);
 
-  return { loadedFont, isConverting, result, error, loadFont, convert, downloadFnt, downloadAtlas, downloadZip };
+  return {
+    loadedFont,
+    isConverting,
+    result,
+    error,
+    loadFont,
+    convert,
+    downloadFnt,
+    downloadAtlas,
+    downloadZip,
+    previewFontFamily: fontFamilyRef.current,
+  };
 }
+

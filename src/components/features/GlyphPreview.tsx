@@ -1,5 +1,4 @@
 import { ConversionResult } from '@/types/font';
-import { useEffect, useRef } from 'react';
 import { Type } from 'lucide-react';
 
 interface GlyphPreviewProps {
