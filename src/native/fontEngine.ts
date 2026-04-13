@@ -19,6 +19,8 @@ export interface NativeGlyphBitmap {
 }
 
 interface NativeModule {
+  default?: (input?: RequestInfo | URL | Response | BufferSource | WebAssembly.Module) => Promise<unknown>;
+  initSync?: (module: BufferSource | WebAssembly.Module) => unknown;
   NativeFontEngine: new (data: Uint8Array) => NativeFontEngine;
 }
 
@@ -35,13 +37,22 @@ let nativeModulePromise: Promise<NativeModule> | null = null;
 
 async function loadModule(): Promise<NativeModule> {
   if (!nativeModulePromise) {
-    nativeModulePromise = import('./wasm/pkg/font_native.js') as Promise<NativeModule>;
+    nativeModulePromise = (async () => {
+      const mod = await import('./wasm/pkg/font_native.js') as NativeModule;
+      if (typeof mod.default === 'function') {
+        await mod.default();
+      }
+      return mod;
+    })();
   }
   return nativeModulePromise;
 }
 
 export async function createNativeFontEngine(fontData: Uint8Array) {
   const mod = await loadModule();
+  if (!mod.NativeFontEngine) {
+    throw new Error('WASM module loaded but NativeFontEngine export is missing.');
+  }
   const engine = new mod.NativeFontEngine(fontData);
 
   return {
