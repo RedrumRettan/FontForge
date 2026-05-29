@@ -52,14 +52,18 @@ const Index = () => {
   const [tableInfo, setTableInfo] = useState<FontTableInfo | null>(null);
   const {
     loadedFont,
+    referenceFnt,
     isConverting,
     result,
     error,
     loadFont,
+    loadReferenceFnt,
+    clearReferenceFnt,
     convert,
     downloadFnt,
     downloadAtlas,
     downloadZip,
+    updateOutputName,
     previewFontFamily,
   } = useFontConverter();
 
@@ -72,11 +76,15 @@ const Index = () => {
     }
   };
 
+  const handleReferenceFntSelected = async (file: File | undefined) => {
+    if (file) await loadReferenceFnt(file);
+  };
+
   const handleConvert = () => {
     convert(config);
   };
 
-  const charCount = CHARSETS[config.charset]?.length ?? config.charset.length;
+  const charCount = referenceFnt?.glyphs.length ?? CHARSETS[config.charset]?.length ?? config.charset.length;
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -162,11 +170,42 @@ const Index = () => {
                       <span>·</span>
                       <span>{charCount} chars</span>
                       <span>·</span>
-                      <span>{config.atlasWidth}×{config.atlasHeight} atlas</span>
+                      <span>{referenceFnt ? `${referenceFnt.scaleW}×${referenceFnt.scaleH} reference atlas` : `${config.atlasWidth}×${config.atlasHeight} atlas`}</span>
                     </div>
                     <p className="text-xs text-muted-foreground">
                       Configure settings in the panel on the right, then click Convert.
                     </p>
+
+                    <div className="mt-4 rounded-lg border border-border bg-secondary/50 p-3 space-y-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-xs text-muted-foreground uppercase tracking-wider">Reference .fnt Layout</p>
+                          <p className="text-[11px] text-muted-foreground mt-0.5">
+                            Optional: place the generated PNG pixels into an existing BMFont layout.
+                          </p>
+                        </div>
+                        {referenceFnt && (
+                          <button
+                            type="button"
+                            onClick={clearReferenceFnt}
+                            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                      <input
+                        type="file"
+                        accept=".fnt"
+                        onChange={(e) => handleReferenceFntSelected(e.target.files?.[0])}
+                        className="block w-full text-xs text-muted-foreground file:mr-3 file:rounded file:border-0 file:bg-primary file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-primary-foreground hover:file:bg-primary/90"
+                      />
+                      {referenceFnt && (
+                        <p className="text-xs text-primary mono">
+                          {referenceFnt.name}.fnt · {referenceFnt.glyphs.length} chars · {referenceFnt.scaleW}×{referenceFnt.scaleH}
+                        </p>
+                      )}
+                    </div>
                   </div>
 
                   <Button
@@ -229,6 +268,7 @@ const Index = () => {
                   onDownloadFnt={downloadFnt}
                   onDownloadAtlas={downloadAtlas}
                   onDownloadBoth={downloadZip}
+                  onOutputNameChange={updateOutputName}
                 />
               </section>
             )}
