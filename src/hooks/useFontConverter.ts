@@ -11,6 +11,17 @@ interface LoadedFont {
   tableInfo: FontTableInfo;
 }
 
+interface ReferenceFntLayout {
+  name: string;
+  content: string;
+  glyphs: CharGlyph[];
+  glyphMap: Map<number, CharGlyph>;
+  lineHeight: number;
+  base: number;
+  scaleW: number;
+  scaleH: number;
+}
+
 interface FontTableRecord {
   offset: number;
 }
@@ -508,6 +519,101 @@ function renameFntOutput(fntContent: string, fontName: string): string {
     .replace(/^page id=0 file="[^"]*"/m, () => `page id=0 file="${fontName}_0.png"`);
 }
 
+function parseBmFontAttributes(line: string): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  const attrRegex = /(\w+)=((?:"[^"]*")|\S+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = attrRegex.exec(line)) !== null) {
+    attrs[match[1]] = match[2].replace(/^"|"$/g, '');
+  }
+  return attrs;
+}
+
+function numberAttribute(attrs: Record<string, string>, key: string, fallback = 0): number {
+  const value = Number(attrs[key]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function parseReferenceFnt(content: string, fileName: string): ReferenceFntLayout {
+  const glyphs: CharGlyph[] = [];
+  let lineHeight = 0;
+  let base = 0;
+  let scaleW = 0;
+  let scaleH = 0;
+
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const attrs = parseBmFontAttributes(line);
+
+    if (line.startsWith('common ')) {
+      lineHeight = numberAttribute(attrs, 'lineHeight', lineHeight);
+      base = numberAttribute(attrs, 'base', base);
+      scaleW = numberAttribute(attrs, 'scaleW', scaleW);
+      scaleH = numberAttribute(attrs, 'scaleH', scaleH);
+    }
+
+    if (line.startsWith('char ')) {
+      const id = numberAttribute(attrs, 'id', -1);
+      if (id < 0) continue;
+      glyphs.push({
+        id,
+        char: String.fromCodePoint(id),
+        x: numberAttribute(attrs, 'x'),
+        y: numberAttribute(attrs, 'y'),
+        width: numberAttribute(attrs, 'width'),
+        height: numberAttribute(attrs, 'height'),
+        xoffset: numberAttribute(attrs, 'xoffset'),
+        yoffset: numberAttribute(attrs, 'yoffset'),
+        xadvance: numberAttribute(attrs, 'xadvance'),
+      });
+    }
+  }
+
+  if (glyphs.length === 0 || scaleW <= 0 || scaleH <= 0) {
+    throw new Error('Reference .fnt must contain BMFont common metrics and char entries.');
+  }
+
+  return {
+    name: fileName.replace(/\.fnt$/i, ''),
+    content,
+    glyphs,
+    glyphMap: new Map(glyphs.map(glyph => [glyph.id, glyph])),
+    lineHeight,
+    base,
+    scaleW,
+    scaleH,
+  };
+}
+
+function drawNormalizedGlyphToRect(
+  ctx: CanvasRenderingContext2D,
+  normalized: NormalizedGlyph,
+  target: CharGlyph,
+) {
+  if (target.width <= 0 || target.height <= 0 || normalized.textureWidth <= 0 || normalized.textureHeight <= 0) return;
+
+  const source = document.createElement('canvas');
+  source.width = normalized.textureWidth;
+  source.height = normalized.textureHeight;
+  const sourceCtx = source.getContext('2d', { willReadFrequently: true })!;
+  const sourceImage = sourceCtx.createImageData(normalized.textureWidth, normalized.textureHeight);
+
+  for (let y = 0; y < normalized.textureHeight; y++) {
+    for (let x = 0; x < normalized.textureWidth; x++) {
+      copyPixel(
+        normalized.imageData.data,
+        sourceImage.data,
+        ((y + normalized.textureY) * normalized.imageData.width + x + normalized.textureX) * 4,
+        (y * normalized.textureWidth + x) * 4,
+      );
+    }
+  }
+
+  sourceCtx.putImageData(sourceImage, 0, 0);
+  ctx.drawImage(source, target.x, target.y, target.width, target.height);
+}
+
 function colorToRgbaU32(color: string): number {
   const canvas = document.createElement('canvas');
   canvas.width = 1;
@@ -559,6 +665,7 @@ function renderGlyph(
 
 export function useFontConverter() {
   const [loadedFont, setLoadedFont] = useState<LoadedFont | null>(null);
+  const [referenceFnt, setReferenceFnt] = useState<ReferenceFntLayout | null>(null);
   const [isConverting, setIsConverting] = useState(false);
   const [result, setResult] = useState<ConversionResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -636,6 +743,34 @@ export function useFontConverter() {
     }
   }, [loadedFont, ensureFontReady]);
 
+  const loadReferenceFnt = useCallback(async (file: File) => {
+    setError(null);
+    setResult(null);
+
+    if (file.name.split('.').pop()?.toLowerCase() !== 'fnt') {
+      setError('Only BMFont .fnt reference files are supported.');
+      return false;
+    }
+
+    try {
+      const content = await file.text();
+      const parsed = parseReferenceFnt(content, file.name);
+      setReferenceFnt(parsed);
+      console.log(`[FontForge] reference .fnt loaded: ${parsed.glyphs.length} chars, ${parsed.scaleW}×${parsed.scaleH}`);
+      return parsed;
+    } catch (e) {
+      console.error('[FontForge] reference .fnt parse error:', e);
+      setReferenceFnt(null);
+      setError('Failed to parse reference .fnt. Make sure it is BMFont text format.');
+      return false;
+    }
+  }, []);
+
+  const clearReferenceFnt = useCallback(() => {
+    setReferenceFnt(null);
+    setResult(null);
+  }, []);
+
   // ── Convert ───────────────────────────────────────────────────────────────
 
   const convert = useCallback(async (config: FontConversionConfig) => {
@@ -654,10 +789,14 @@ export function useFontConverter() {
     await new Promise(r => setTimeout(r, 20));
 
     try {
-      const { fontSize, padding, extrude, spacing, atlasWidth, atlasHeight, color } = config;
+      const { fontSize, padding, extrude, spacing, color } = config;
+      const referenceLayout = referenceFnt;
       const useNativeColors = config.useNativeColors && !!loadedFont?.isColorFont;
-      const chars = CHARSETS[config.charset] ?? config.charset;
-      const charList = Array.from(chars);
+      const charList = referenceLayout
+        ? referenceLayout.glyphs.map(glyph => glyph.char)
+        : Array.from(CHARSETS[config.charset] ?? config.charset);
+      const outputAtlasWidth = referenceLayout?.scaleW ?? config.atlasWidth;
+      const outputAtlasHeight = referenceLayout?.scaleH ?? config.atlasHeight;
       const nativeEngine = loadedFont?.data
         ? await createOptionalNativeFontEngine(loadedFont.data)
         : null;
@@ -684,8 +823,8 @@ export function useFontConverter() {
       const fontMetrics = nativeEngine
         ? nativeEngine.metrics(fontSize)
         : browserFontLineMetrics(mCtx, fontSize);
-      const base = Math.ceil(fontMetrics.ascent);
-      const lineHeight = Math.ceil(fontMetrics.ascent + Math.abs(fontMetrics.descent) + fontMetrics.line_gap);
+      const base = referenceLayout?.base ?? Math.ceil(fontMetrics.ascent);
+      const lineHeight = referenceLayout?.lineHeight ?? Math.ceil(fontMetrics.ascent + Math.abs(fontMetrics.descent) + fontMetrics.line_gap);
       const totalPadding = padding + Math.max(0, Math.min(2, Math.floor(extrude)));
 
       interface RenderEntry {
@@ -712,11 +851,14 @@ export function useFontConverter() {
           : bitmap
             ? glyphBitmapToRender(bitmap)
             : renderGlyph(char, fontFamily, fontSize, color, textMetrics);
-        const xadvance = bitmap
-          ? Math.round(bitmap.advance_width)
-          : nativeEngine
-            ? Math.round(nativeEngine.glyphMetrics(glyphId, fontSize).advance_width)
-            : Math.round(textMetrics.width);
+        const referenceGlyph = referenceLayout?.glyphMap.get(id);
+        const xadvance = referenceGlyph
+          ? referenceGlyph.xadvance
+          : bitmap
+            ? Math.round(bitmap.advance_width)
+            : nativeEngine
+              ? Math.round(nativeEngine.glyphMetrics(glyphId, fontSize).advance_width)
+              : Math.round(textMetrics.width);
 
         entries.push({
           char,
@@ -731,79 +873,94 @@ export function useFontConverter() {
       // ── 2. Pack glyphs into the atlas canvas ──────────────────────────────
 
       const atlas = document.createElement('canvas');
-      atlas.width  = atlasWidth;
-      atlas.height = atlasHeight;
+      atlas.width  = outputAtlasWidth;
+      atlas.height = outputAtlasHeight;
       const actx = atlas.getContext('2d')!;
-      actx.clearRect(0, 0, atlasWidth, atlasHeight);
+      actx.clearRect(0, 0, outputAtlasWidth, outputAtlasHeight);
 
       const glyphs: CharGlyph[] = [];
-      let cx = totalPadding;
-      let cy = totalPadding;
-      let rowH = lineHeight + totalPadding * 2;
-
-      for (const { char, id, normalized, xadvance } of entries) {
-        if (!normalized) {
-          glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
-          continue;
+      if (referenceLayout) {
+        for (const { id, normalized } of entries) {
+          const referenceGlyph = referenceLayout.glyphMap.get(id);
+          if (!referenceGlyph) continue;
+          if (normalized) drawNormalizedGlyphToRect(actx, normalized, referenceGlyph);
+          glyphs.push({ ...referenceGlyph });
         }
+      } else {
+        let cx = totalPadding;
+        let cy = totalPadding;
+        let rowH = lineHeight + totalPadding * 2;
 
-        const gw = normalized.imageData.width;
-        const gh = normalized.imageData.height;
+        for (const { char, id, normalized, xadvance } of entries) {
+          if (!normalized) {
+            glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
+            continue;
+          }
 
-        if (cx + gw > atlasWidth - totalPadding) {
-          cx = totalPadding;
-          cy += rowH + spacing;
-          rowH = lineHeight + totalPadding * 2;
+          const gw = normalized.imageData.width;
+          const gh = normalized.imageData.height;
+
+          if (cx + gw > outputAtlasWidth - totalPadding) {
+            cx = totalPadding;
+            cy += rowH + spacing;
+            rowH = lineHeight + totalPadding * 2;
+          }
+
+          if (cy + gh > outputAtlasHeight) {
+            console.warn(`[FontForge] atlas full — '${char}' skipped`);
+            glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
+            continue;
+          }
+
+          actx.putImageData(normalized.imageData, cx, cy);
+
+          glyphs.push({
+            id,
+            char,
+            x: cx + normalized.textureX,
+            y: cy + normalized.textureY,
+            width: normalized.textureWidth,
+            height: normalized.textureHeight,
+            xoffset: normalized.xoffset,
+            yoffset: normalized.yoffset,
+            xadvance,
+          });
+
+          cx += gw + spacing;
+          rowH = Math.max(rowH, gh);
         }
-
-        if (cy + gh > atlasHeight) {
-          console.warn(`[FontForge] atlas full — '${char}' skipped`);
-          glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
-          continue;
-        }
-
-        actx.putImageData(normalized.imageData, cx, cy);
-
-        glyphs.push({
-          id,
-          char,
-          x: cx + normalized.textureX,
-          y: cy + normalized.textureY,
-          width: normalized.textureWidth,
-          height: normalized.textureHeight,
-          xoffset: normalized.xoffset,
-          yoffset: normalized.yoffset,
-          xadvance,
-        });
-
-        cx += gw + spacing;
-        rowH = Math.max(rowH, gh);
       }
 
       // ── 3. Generate the .fnt text ─────────────────────────────────────────
 
       const lines: string[] = [];
-      lines.push(
-        `info face="${fontName}" size=${fontSize} bold=0 italic=0 charset="" unicode=1 stretchH=100 smooth=1 aa=1` +
-        ` padding=${totalPadding},${totalPadding},${totalPadding},${totalPadding} spacing=${spacing},${spacing}`
-      );
-      lines.push(
-        `common lineHeight=${lineHeight} base=${base} scaleW=${atlasWidth} scaleH=${atlasHeight} pages=1 packed=0`
-      );
-      lines.push(`page id=0 file="${fontName}_0.png"`);
-      lines.push(`chars count=${glyphs.length}`);
-
-      for (const g of glyphs) {
+      let fntContent: string;
+      if (referenceLayout) {
+        fntContent = renameFntOutput(referenceLayout.content, fontName);
+      } else {
         lines.push(
-          `char id=${g.id} ` +
-          `x=${g.x} y=${g.y} ` +
-          `width=${g.width} height=${g.height} ` +
-          `xoffset=${g.xoffset} yoffset=${g.yoffset} ` +
-          `xadvance=${g.xadvance} page=0 chnl=15`
+          `info face="${fontName}" size=${fontSize} bold=0 italic=0 charset="" unicode=1 stretchH=100 smooth=1 aa=1` +
+          ` padding=${totalPadding},${totalPadding},${totalPadding},${totalPadding} spacing=${spacing},${spacing}`
         );
+        lines.push(
+          `common lineHeight=${lineHeight} base=${base} scaleW=${outputAtlasWidth} scaleH=${outputAtlasHeight} pages=1 packed=0`
+        );
+        lines.push(`page id=0 file="${fontName}_0.png"`);
+        lines.push(`chars count=${glyphs.length}`);
+
+        for (const g of glyphs) {
+          lines.push(
+            `char id=${g.id} ` +
+            `x=${g.x} y=${g.y} ` +
+            `width=${g.width} height=${g.height} ` +
+            `xoffset=${g.xoffset} yoffset=${g.yoffset} ` +
+            `xadvance=${g.xadvance} page=0 chnl=15`
+          );
+        }
+
+        fntContent = lines.join('\n');
       }
 
-      const fntContent = lines.join('\n');
       const atlasDataUrl = atlas.toDataURL('image/png');
 
       const packed = glyphs.filter(g => g.width > 0).length;
@@ -816,7 +973,7 @@ export function useFontConverter() {
     } finally {
       setIsConverting(false);
     }
-  }, [loadedFont, ensureFontReady]);
+  }, [loadedFont, referenceFnt, ensureFontReady]);
 
   // ── Downloads ─────────────────────────────────────────────────────────────
 
@@ -863,10 +1020,13 @@ export function useFontConverter() {
 
   return {
     loadedFont,
+    referenceFnt,
     isConverting,
     result,
     error,
     loadFont,
+    loadReferenceFnt,
+    clearReferenceFnt,
     convert,
     downloadFnt,
     downloadAtlas,
