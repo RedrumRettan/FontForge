@@ -1,12 +1,51 @@
 import { useState, useCallback, useRef } from 'react';
 import { FontConversionConfig, ConversionResult, CharGlyph, CHARSETS, FontTableInfo } from '@/types/font';
+import { createNativeFontEngine, NativeGlyphBitmap } from '@/native/fontEngine';
 
 interface LoadedFont {
   name: string;
   file: File;
   objectUrl: string;
+  data: Uint8Array;
   isColorFont: boolean;
   tableInfo: FontTableInfo;
+}
+
+interface FontTableRecord {
+  offset: number;
+}
+
+type NativeFontEngineHandle = Awaited<ReturnType<typeof createNativeFontEngine>>;
+
+async function createOptionalNativeFontEngine(fontData: Uint8Array): Promise<NativeFontEngineHandle | null> {
+  try {
+    return await createNativeFontEngine(fontData);
+  } catch (e) {
+    console.warn('[FontForge] native rasterizer unavailable; falling back to browser canvas rendering:', e);
+    return null;
+  }
+}
+
+function readTableRecords(buffer: ArrayBuffer | Uint8Array): Map<string, FontTableRecord> {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const records = new Map<string, FontTableRecord>();
+  if (bytes.byteLength < 12) return records;
+
+  const numTables = view.getUint16(4);
+  for (let i = 0; i < numTables; i++) {
+    const base = 12 + i * 16;
+    if (base + 16 > bytes.byteLength) break;
+    const tag = String.fromCharCode(
+      view.getUint8(base),
+      view.getUint8(base + 1),
+      view.getUint8(base + 2),
+      view.getUint8(base + 3),
+    );
+    records.set(tag, { offset: view.getUint32(base + 8) });
+  }
+
+  return records;
 }
 
 // ─── Binary table parser ──────────────────────────────────────────────────────
@@ -18,25 +57,9 @@ async function parseFontTables(file: File): Promise<FontTableInfo> {
   };
   try {
     const buffer = await file.arrayBuffer();
-    const view = new DataView(buffer);
-    if (buffer.byteLength < 12) return empty;
-
-    const numTables = view.getUint16(4);
-    const tableTags = new Set<string>();
-    const rawTables: string[] = [];
-
-    for (let i = 0; i < numTables; i++) {
-      const base = 12 + i * 16;
-      if (base + 4 > buffer.byteLength) break;
-      const tag = String.fromCharCode(
-        view.getUint8(base),
-        view.getUint8(base + 1),
-        view.getUint8(base + 2),
-        view.getUint8(base + 3),
-      );
-      tableTags.add(tag);
-      rawTables.push(tag.trimEnd());
-    }
+    const records = readTableRecords(buffer);
+    const tableTags = new Set(records.keys());
+    const rawTables = Array.from(records.keys(), tag => tag.trimEnd());
 
     console.log('[FontForge] tables:', rawTables.join(', '));
 
@@ -56,30 +79,6 @@ async function parseFontTables(file: File): Promise<FontTableInfo> {
     console.warn('[FontForge] table parse failed:', e);
     return empty;
   }
-}
-
-// ─── Color font detection ─────────────────────────────────────────────────────
-
-function detectColorFont(fontFamily: string): boolean {
-  const size = 64;
-  const c = document.createElement('canvas');
-  c.width = size; c.height = size;
-  const ctx = c.getContext('2d', { willReadFrequently: true })!;
-  ctx.font = `48px "${fontFamily}"`;
-  ctx.textBaseline = 'alphabetic';
-  // Don't set fillStyle — let native colors render
-  ctx.fillText('A', 8, 48);
-  const { data } = ctx.getImageData(0, 0, size, size);
-  for (let i = 0; i < data.length; i += 4) {
-    const [r, g, b, a] = [data[i], data[i+1], data[i+2], data[i+3]];
-    if (a > 20) {
-      const avg = (r + g + b) / 3;
-      if (Math.abs(r - avg) > 15 || Math.abs(g - avg) > 15 || Math.abs(b - avg) > 15) {
-        return true;
-      }
-    }
-  }
-  return false;
 }
 
 // ─── Single-glyph renderer ────────────────────────────────────────────────────
@@ -127,12 +126,117 @@ function cropGlyphFromCanvas(
   };
 }
 
+async function extractSvgDocument(fontData: Uint8Array, glyphId: number): Promise<string | null> {
+  const svgTable = readTableRecords(fontData).get('SVG ');
+  if (!svgTable) return null;
+
+  const view = new DataView(fontData.buffer, fontData.byteOffset, fontData.byteLength);
+  const tableStart = svgTable.offset;
+  if (tableStart + 10 > fontData.byteLength) return null;
+
+  const docIndexOffset = view.getUint32(tableStart + 2);
+  const indexStart = tableStart + docIndexOffset;
+  if (indexStart + 2 > fontData.byteLength) return null;
+
+  const count = view.getUint16(indexStart);
+  const decoder = new TextDecoder('utf-8');
+
+  for (let i = 0; i < count; i++) {
+    const entry = indexStart + 2 + i * 12;
+    if (entry + 12 > fontData.byteLength) break;
+
+    const startGlyph = view.getUint16(entry);
+    const endGlyph = view.getUint16(entry + 2);
+    if (glyphId < startGlyph || glyphId > endGlyph) continue;
+
+    const docOffset = view.getUint32(entry + 4);
+    const docLength = view.getUint32(entry + 8);
+    const docStart = indexStart + docOffset;
+    const docEnd = docStart + docLength;
+    if (docEnd > fontData.byteLength) return null;
+
+    const bytes = fontData.subarray(docStart, docEnd);
+    if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+      if (!('DecompressionStream' in window)) return null;
+      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+      return new Response(stream).text();
+    }
+
+    return decoder.decode(bytes);
+  }
+
+  return null;
+}
+
+function rasterizeSvgDocument(svg: string, fontSize: number): Promise<GlyphRender | null> {
+  return new Promise(resolve => {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(svg, 'image/svg+xml');
+    const root = doc.documentElement;
+    if (!root || root.nodeName.toLowerCase() !== 'svg') {
+      resolve(null);
+      return;
+    }
+
+    root.setAttribute('width', String(fontSize));
+    root.setAttribute('height', String(fontSize));
+    if (!root.getAttribute('xmlns')) {
+      root.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    }
+
+    const serialized = new XMLSerializer().serializeToString(root);
+    const url = URL.createObjectURL(new Blob([serialized], { type: 'image/svg+xml' }));
+    const image = new Image();
+
+    image.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = fontSize;
+      canvas.height = fontSize;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+      ctx.clearRect(0, 0, fontSize, fontSize);
+      ctx.drawImage(image, 0, 0, fontSize, fontSize);
+      URL.revokeObjectURL(url);
+      resolve(cropGlyphFromCanvas(ctx, fontSize, fontSize, 0, fontSize));
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve(null);
+    };
+    image.src = url;
+  });
+}
+
+function glyphBitmapToRender(bitmap: NativeGlyphBitmap): GlyphRender | null {
+  if (bitmap.width === 0 || bitmap.height === 0) return null;
+
+  const rgba = bitmap.rgba instanceof Uint8Array
+    ? bitmap.rgba
+    : Uint8Array.from(bitmap.rgba as unknown as ArrayLike<number>);
+  const pixels = new Uint8ClampedArray(rgba);
+
+  return {
+    imageData: new ImageData(pixels, bitmap.width, bitmap.height),
+    ascent: bitmap.top,
+    xoffset: bitmap.left,
+  };
+}
+
+function colorToRgbaU32(color: string): number {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1;
+  canvas.height = 1;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = color;
+  ctx.fillRect(0, 0, 1, 1);
+  const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
+  return (((r << 24) | (g << 16) | (b << 8) | a) >>> 0);
+}
+
 function renderGlyph(
   char: string,
   fontFamily: string,
   fontSize: number,
   color: string,
-  nativeColors: boolean,
 ): Promise<GlyphRender | null> {
   // Oversized canvas so glyphs with extreme descenders/ascenders fit
   const margin = Math.ceil(fontSize * 1.5);
@@ -152,9 +256,7 @@ function renderGlyph(
   ctx.font = `${fontSize}px "${fontFamily}"`;
   ctx.textBaseline = 'alphabetic';
 
-  // Some color-font implementations use "currentColor"/foreground palette entries.
-  // Use white as neutral foreground in native-color mode to avoid default black glyphs.
-  ctx.fillStyle = nativeColors ? '#ffffff' : color;
+  ctx.fillStyle = color;
   ctx.fillText(char, drawX, drawY);
 
   return cropGlyphFromCanvas(ctx, cw, ch, drawX, drawY);
@@ -226,16 +328,12 @@ export function useFontConverter() {
       }
 
       const cleanName = file.name.replace(/\.(ttf|otf)$/i, '');
-
-      const [tableInfo, isColorByPixel] = await Promise.all([
-        parseFontTables(file),
-        Promise.resolve(detectColorFont(fontFamily)),
-      ]);
-
-      const isColorFont = isColorByPixel || tableInfo.hasSVG || tableInfo.hasCOLR || tableInfo.hasCBDT || tableInfo.hasSBIX;
+      const fontData = new Uint8Array(await file.arrayBuffer());
+      const tableInfo = await parseFontTables(file);
+      const isColorFont = tableInfo.hasSVG || tableInfo.hasCOLR || tableInfo.hasCBDT || tableInfo.hasSBIX;
       console.log('[FontForge] loaded:', cleanName, 'color:', isColorFont, 'tables:', tableInfo.rawTables.join(', '));
 
-      setLoadedFont({ name: cleanName, file, objectUrl, isColorFont, tableInfo });
+      setLoadedFont({ name: cleanName, file, objectUrl, data: fontData, isColorFont, tableInfo });
       return { fontFamily, isColorFont, tableInfo };
     } catch (e) {
       console.error('[FontForge] load error:', e);
@@ -266,6 +364,14 @@ export function useFontConverter() {
       const { fontSize, padding, spacing, atlasWidth, atlasHeight, color } = config;
       const useNativeColors = config.useNativeColors && !!loadedFont?.isColorFont;
       const chars = CHARSETS[config.charset] ?? config.charset;
+      const charList = Array.from(chars);
+      const nativeEngine = useNativeColors && loadedFont?.data
+        ? await createOptionalNativeFontEngine(loadedFont.data)
+        : null;
+      const nativeGlyphIds = nativeEngine
+        ? nativeEngine.resolveGlyphIndices(charList.map(char => char.codePointAt(0) ?? 0))
+        : [];
+      const nativeColor = colorToRgbaU32(color);
 
       const active = await ensureFontReady(fontFamily, fontSize);
       if (!active) {
@@ -290,9 +396,24 @@ export function useFontConverter() {
       let globalAscent = 0;   // max pixels above baseline across all glyphs
       let globalDescent = 0;  // max pixels below baseline
 
-      for (const char of chars) {
-        const render = await renderGlyph(char, fontFamily, fontSize, color, useNativeColors);
-        const xadvance = Math.round(mCtx.measureText(char).width);
+      for (const [index, char] of charList.entries()) {
+        const glyphId = nativeGlyphIds[index] ?? 0;
+        const svgDocument = nativeEngine && useNativeColors && loadedFont?.tableInfo.hasSVG
+          ? await extractSvgDocument(loadedFont.data, glyphId)
+          : null;
+        const bitmap = nativeEngine && useNativeColors && !svgDocument
+          ? nativeEngine.rasterizeGlyph(glyphId, fontSize, nativeColor)
+          : null;
+        const render = svgDocument
+          ? await rasterizeSvgDocument(svgDocument, fontSize)
+          : bitmap
+            ? glyphBitmapToRender(bitmap)
+            : await renderGlyph(char, fontFamily, fontSize, color);
+        const xadvance = bitmap
+          ? Math.round(bitmap.advance_width)
+          : nativeEngine
+            ? Math.round(nativeEngine.glyphMetrics(glyphId, fontSize).advance_width)
+            : Math.round(mCtx.measureText(char).width);
 
         if (render) {
           globalAscent  = Math.max(globalAscent,  render.ascent);
@@ -300,7 +421,7 @@ export function useFontConverter() {
           globalDescent = Math.max(globalDescent, render.imageData.height - render.ascent);
         }
 
-        entries.push({ char, id: char.charCodeAt(0), render, xadvance });
+        entries.push({ char, id: char.codePointAt(0) ?? 0, render, xadvance });
       }
 
       // Add 1px slack so descenders don't clip

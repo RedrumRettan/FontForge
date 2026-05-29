@@ -1,6 +1,6 @@
 use rustybuzz::{Face as RbFace, UnicodeBuffer};
 use serde::Serialize;
-use swash::scale::{Render, ScaleContext, Source, StrikeWith};
+use swash::scale::{image::Content, Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::Format;
 use ttf_parser::{Face, GlyphId, OutlineBuilder};
 use wasm_bindgen::prelude::*;
@@ -54,7 +54,24 @@ struct GlyphBitmap {
     left: i32,
     top: i32,
     advance_width: f32,
+    renderer: RendererKind,
     rgba: Vec<u8>,
+}
+
+#[derive(Copy, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RendererKind {
+    ColrCpal,
+    Svg,
+    EmbeddedBitmap,
+    Outline,
+}
+
+#[derive(Copy, Clone)]
+struct RenderPlan {
+    kind: RendererKind,
+    sources: &'static [Source],
+    color_output: bool,
 }
 
 #[wasm_bindgen]
@@ -173,24 +190,35 @@ impl NativeFontEngine {
         serde_wasm_bindgen::to_value(&glyphs).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
-    pub fn rasterize_glyph(&self, glyph_id: u16, px_size: f32, color_rgba: u32) -> Result<JsValue, JsValue> {
+    pub fn rasterize_glyph(
+        &self,
+        glyph_id: u16,
+        px_size: f32,
+        color_rgba: u32,
+    ) -> Result<JsValue, JsValue> {
         let face = self.face()?;
         let gid = GlyphId(glyph_id);
+        let plan = render_plan(&face);
+
+        if matches!(plan.kind, RendererKind::Svg) {
+            return Err(JsValue::from_str(
+                "SVG color glyph rasterization requires a linked SVG backend (Skia, resvg, or librsvg)",
+            ));
+        }
+
+        let font = swash::FontRef::from_index(&self.data, 0)
+            .ok_or_else(|| JsValue::from_str("Invalid font index"))?;
         let mut scaler_ctx = ScaleContext::new();
-        let mut scaler = scaler_ctx.builder(swash::FontRef::from_index(&self.data, 0).ok_or_else(|| JsValue::from_str("Invalid font index"))?)
-            .size(px_size)
-            .build();
+        let mut scaler = scaler_ctx.builder(font).size(px_size).build();
 
-        let image = Render::new(&[
-            Source::ColorOutline(0),
-            Source::ColorBitmap(StrikeWith::BestFit),
-            Source::Outline,
-        ])
-        .format(Format::Alpha)
-        .render(&mut scaler, swash::GlyphId(glyph_id));
+        let mut renderer = Render::new(plan.sources);
+        renderer.format(Format::Alpha);
+        renderer.default_color(unpack_rgba(color_rgba));
 
-        let image = image.ok_or_else(|| JsValue::from_str("Glyph render failed"))?;
-        let rgba = expand_to_rgba(image.data.as_ref(), color_rgba);
+        let image = renderer
+            .render(&mut scaler, swash::GlyphId(glyph_id))
+            .ok_or_else(|| JsValue::from_str("Glyph render failed"))?;
+        let rgba = image_to_rgba(&image.data, image.content, color_rgba)?;
 
         let scale = px_size / face.units_per_em() as f32;
         let advance_width = face.glyph_hor_advance(gid).unwrap_or(0) as f32 * scale;
@@ -201,6 +229,11 @@ impl NativeFontEngine {
             left: image.placement.left,
             top: image.placement.top,
             advance_width,
+            renderer: if matches!(image.content, Content::Color) || plan.color_output {
+                plan.kind
+            } else {
+                RendererKind::Outline
+            },
             rgba,
         };
 
@@ -210,7 +243,8 @@ impl NativeFontEngine {
 
 impl NativeFontEngine {
     fn face(&self) -> Result<Face<'_>, JsValue> {
-        Face::parse(&self.data, 0).map_err(|e| JsValue::from_str(&format!("Face parse error: {e:?}")))
+        Face::parse(&self.data, 0)
+            .map_err(|e| JsValue::from_str(&format!("Face parse error: {e:?}")))
     }
 }
 
@@ -239,11 +273,66 @@ impl OutlineBuilder for BoundsBuilder {
     fn close(&mut self) {}
 }
 
+fn render_plan(face: &Face<'_>) -> RenderPlan {
+    const COLR_SOURCES: &[Source] = &[Source::ColorOutline(0), Source::Outline];
+    const BITMAP_SOURCES: &[Source] = &[Source::ColorBitmap(StrikeWith::BestFit), Source::Outline];
+    const OUTLINE_SOURCES: &[Source] = &[Source::Outline];
+
+    let tables = face.tables();
+    if tables.colr.is_some() && tables.cpal.is_some() {
+        RenderPlan {
+            kind: RendererKind::ColrCpal,
+            sources: COLR_SOURCES,
+            color_output: true,
+        }
+    } else if tables.svg.is_some() {
+        RenderPlan {
+            kind: RendererKind::Svg,
+            sources: OUTLINE_SOURCES,
+            color_output: true,
+        }
+    } else if tables.cbdt.is_some() || tables.cblc.is_some() || tables.sbix.is_some() {
+        RenderPlan {
+            kind: RendererKind::EmbeddedBitmap,
+            sources: BITMAP_SOURCES,
+            color_output: true,
+        }
+    } else {
+        RenderPlan {
+            kind: RendererKind::Outline,
+            sources: OUTLINE_SOURCES,
+            color_output: false,
+        }
+    }
+}
+
+fn image_to_rgba(data: &[u8], content: Content, color_rgba: u32) -> Result<Vec<u8>, JsValue> {
+    match content {
+        Content::Color => Ok(data.to_vec()),
+        Content::Mask => Ok(expand_to_rgba(data, color_rgba)),
+        Content::SubpixelMask => {
+            let [_, _, _, alpha] = unpack_rgba(color_rgba);
+            let mut out = Vec::with_capacity(data.len());
+            for px in data.chunks_exact(4) {
+                let a = ((px[3] as u16 * alpha as u16) / 255) as u8;
+                out.extend_from_slice(&[px[0], px[1], px[2], a]);
+            }
+            Ok(out)
+        }
+    }
+}
+
+fn unpack_rgba(color_rgba: u32) -> [u8; 4] {
+    [
+        ((color_rgba >> 24) & 0xFF) as u8,
+        ((color_rgba >> 16) & 0xFF) as u8,
+        ((color_rgba >> 8) & 0xFF) as u8,
+        (color_rgba & 0xFF) as u8,
+    ]
+}
+
 fn expand_to_rgba(alpha: &[u8], color_rgba: u32) -> Vec<u8> {
-    let r = ((color_rgba >> 24) & 0xFF) as u8;
-    let g = ((color_rgba >> 16) & 0xFF) as u8;
-    let b = ((color_rgba >> 8) & 0xFF) as u8;
-    let a = (color_rgba & 0xFF) as u8;
+    let [r, g, b, a] = unpack_rgba(color_rgba);
 
     let mut out = Vec::with_capacity(alpha.len() * 4);
     for coverage in alpha {
