@@ -492,6 +492,22 @@ function glyphBitmapToRender(bitmap: NativeGlyphBitmap): GlyphRender | null {
   };
 }
 
+function sanitizeOutputName(name: string, fallback: string): string {
+  const sanitized = name
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+    .replace(/\s+/g, ' ')
+    .replace(/^\.+|\.+$/g, '');
+
+  return sanitized || fallback;
+}
+
+function renameFntOutput(fntContent: string, fontName: string): string {
+  return fntContent
+    .replace(/^info face="[^"]*"/m, () => `info face="${fontName}"`)
+    .replace(/^page id=0 file="[^"]*"/m, () => `page id=0 file="${fontName}_0.png"`);
+}
+
 function colorToRgbaU32(color: string): number {
   const canvas = document.createElement('canvas');
   canvas.width = 1;
@@ -833,6 +849,18 @@ export function useFontConverter() {
     setTimeout(downloadAtlas, 350);
   }, [result, downloadFnt, downloadAtlas]);
 
+  const updateOutputName = useCallback((name: string) => {
+    setResult(prev => {
+      if (!prev) return prev;
+      const fontName = sanitizeOutputName(name, prev.fontName);
+      return {
+        ...prev,
+        fontName,
+        fntContent: renameFntOutput(prev.fntContent, fontName),
+      };
+    });
+  }, []);
+
   return {
     loadedFont,
     isConverting,
@@ -843,6 +871,7 @@ export function useFontConverter() {
     downloadFnt,
     downloadAtlas,
     downloadZip,
+    updateOutputName,
     previewFontFamily: fontFamilyRef.current,
   };
 }

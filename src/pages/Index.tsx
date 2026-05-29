@@ -60,6 +60,7 @@ const Index = () => {
     downloadFnt,
     downloadAtlas,
     downloadZip,
+    updateOutputName,
     previewFontFamily,
   } = useFontConverter();
 
@@ -229,6 +230,7 @@ const Index = () => {
                   onDownloadFnt={downloadFnt}
                   onDownloadAtlas={downloadAtlas}
                   onDownloadBoth={downloadZip}
+                  onOutputNameChange={updateOutputName}
                 />
               </section>
             )}
