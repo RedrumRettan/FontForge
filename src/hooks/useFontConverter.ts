@@ -15,6 +15,17 @@ interface FontTableRecord {
   offset: number;
 }
 
+type NativeFontEngineHandle = Awaited<ReturnType<typeof createNativeFontEngine>>;
+
+async function createOptionalNativeFontEngine(fontData: Uint8Array): Promise<NativeFontEngineHandle | null> {
+  try {
+    return await createNativeFontEngine(fontData);
+  } catch (e) {
+    console.warn('[FontForge] native rasterizer unavailable; falling back to browser canvas rendering:', e);
+    return null;
+  }
+}
+
 function readTableRecords(buffer: ArrayBuffer | Uint8Array): Map<string, FontTableRecord> {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -353,16 +364,12 @@ export function useFontConverter() {
       const { fontSize, padding, spacing, atlasWidth, atlasHeight, color } = config;
       const useNativeColors = config.useNativeColors && !!loadedFont?.isColorFont;
       const chars = CHARSETS[config.charset] ?? config.charset;
-      let nativeEngine: Awaited<ReturnType<typeof createNativeFontEngine>> | null = null;
-      if (useNativeColors && loadedFont?.data) {
-        try {
-          nativeEngine = await createNativeFontEngine(loadedFont.data);
-        } catch {
-          console.warn('[FontForge] native engine unavailable — using canvas fallback');
-        }
-      }
+      const charList = Array.from(chars);
+      const nativeEngine = useNativeColors && loadedFont?.data
+        ? await createOptionalNativeFontEngine(loadedFont.data)
+        : null;
       const nativeGlyphIds = nativeEngine
-        ? nativeEngine.resolveGlyphIndices(Array.from(chars, char => char.codePointAt(0) ?? 0))
+        ? nativeEngine.resolveGlyphIndices(charList.map(char => char.codePointAt(0) ?? 0))
         : [];
       const nativeColor = colorToRgbaU32(color);
 
@@ -389,7 +396,7 @@ export function useFontConverter() {
       let globalAscent = 0;   // max pixels above baseline across all glyphs
       let globalDescent = 0;  // max pixels below baseline
 
-      for (const [index, char] of Array.from(chars).entries()) {
+      for (const [index, char] of charList.entries()) {
         const glyphId = nativeGlyphIds[index] ?? 0;
         const svgDocument = nativeEngine && useNativeColors && loadedFont?.tableInfo.hasSVG
           ? await extractSvgDocument(loadedFont.data, glyphId)
