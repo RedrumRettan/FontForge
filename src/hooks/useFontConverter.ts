@@ -11,6 +11,22 @@ interface LoadedFont {
   tableInfo: FontTableInfo;
 }
 
+interface ReferenceFntLayout {
+  name: string;
+  content: string;
+  glyphs: CharGlyph[];
+  glyphMap: Map<number, CharGlyph>;
+  lineHeight: number;
+  base: number;
+  scaleW: number;
+  scaleH: number;
+}
+
+interface ReferenceGlyphPlacement {
+  insetX: number;
+  insetY: number;
+}
+
 interface FontTableRecord {
   offset: number;
 }
@@ -97,8 +113,17 @@ interface GlyphRender {
 
 interface NormalizedGlyph {
   imageData: ImageData;
+  textureX: number;
+  textureY: number;
+  textureWidth: number;
+  textureHeight: number;
   xoffset: number;
   yoffset: number;
+}
+
+interface SvgGlyphDocument {
+  svg: string;
+  glyphId: number;
 }
 
 function copyPixel(src: Uint8ClampedArray, dst: Uint8ClampedArray, srcIndex: number, dstIndex: number) {
@@ -143,8 +168,12 @@ function normalizeGlyphBitmap(render: GlyphRender, padding: number, extrude: num
 
   return {
     imageData: new ImageData(dst, dstWidth, dstHeight),
-    xoffset: Math.round(render.left) - border,
-    yoffset: base - Math.round(render.top) - border,
+    textureX: border,
+    textureY: border,
+    textureWidth: src.width,
+    textureHeight: src.height,
+    xoffset: Math.round(render.left),
+    yoffset: base - Math.round(render.top),
   };
 }
 
@@ -157,7 +186,120 @@ function browserFontLineMetrics(ctx: CanvasRenderingContext2D, fontSize: number)
   };
 }
 
-async function extractSvgDocument(fontData: Uint8Array, glyphId: number): Promise<string | null> {
+function readGlyphFromCmapFormat0(view: DataView, subtableStart: number, codepoint: number): number | null {
+  if (codepoint < 0 || codepoint > 255 || subtableStart + 262 > view.byteLength) return null;
+  return view.getUint8(subtableStart + 6 + codepoint);
+}
+
+function readGlyphFromCmapFormat4(view: DataView, subtableStart: number, codepoint: number): number | null {
+  if (codepoint < 0 || codepoint > 0xffff || subtableStart + 16 > view.byteLength) return null;
+
+  const length = view.getUint16(subtableStart + 2);
+  const subtableEnd = subtableStart + length;
+  if (subtableEnd > view.byteLength) return null;
+
+  const segCount = view.getUint16(subtableStart + 6) / 2;
+  const endCodeStart = subtableStart + 14;
+  const startCodeStart = endCodeStart + segCount * 2 + 2;
+  const idDeltaStart = startCodeStart + segCount * 2;
+  const idRangeOffsetStart = idDeltaStart + segCount * 2;
+  if (idRangeOffsetStart + segCount * 2 > subtableEnd) return null;
+
+  for (let i = 0; i < segCount; i++) {
+    const endCode = view.getUint16(endCodeStart + i * 2);
+    const startCode = view.getUint16(startCodeStart + i * 2);
+    if (codepoint < startCode || codepoint > endCode) continue;
+
+    const idDelta = view.getInt16(idDeltaStart + i * 2);
+    const idRangeOffsetAddress = idRangeOffsetStart + i * 2;
+    const idRangeOffset = view.getUint16(idRangeOffsetAddress);
+    if (idRangeOffset === 0) {
+      return (codepoint + idDelta) & 0xffff;
+    }
+
+    const glyphIndexAddress = idRangeOffsetAddress + idRangeOffset + (codepoint - startCode) * 2;
+    if (glyphIndexAddress + 2 > subtableEnd) return null;
+    const glyphIndex = view.getUint16(glyphIndexAddress);
+    return glyphIndex === 0 ? 0 : (glyphIndex + idDelta) & 0xffff;
+  }
+
+  return null;
+}
+
+function readGlyphFromCmapFormat12(view: DataView, subtableStart: number, codepoint: number): number | null {
+  if (subtableStart + 16 > view.byteLength) return null;
+
+  const length = view.getUint32(subtableStart + 4);
+  const subtableEnd = subtableStart + length;
+  if (subtableEnd > view.byteLength) return null;
+
+  const groupCount = view.getUint32(subtableStart + 12);
+  let lo = 0;
+  let hi = groupCount - 1;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const groupStart = subtableStart + 16 + mid * 12;
+    if (groupStart + 12 > subtableEnd) return null;
+
+    const startCharCode = view.getUint32(groupStart);
+    const endCharCode = view.getUint32(groupStart + 4);
+    if (codepoint < startCharCode) {
+      hi = mid - 1;
+    } else if (codepoint > endCharCode) {
+      lo = mid + 1;
+    } else {
+      return view.getUint32(groupStart + 8) + codepoint - startCharCode;
+    }
+  }
+
+  return null;
+}
+
+function resolveGlyphIdsFromCmap(fontData: Uint8Array, codepoints: number[]): number[] {
+  const cmapTable = readTableRecords(fontData).get('cmap');
+  if (!cmapTable) return codepoints.map(() => 0);
+
+  const view = new DataView(fontData.buffer, fontData.byteOffset, fontData.byteLength);
+  const cmapStart = cmapTable.offset;
+  if (cmapStart + 4 > fontData.byteLength) return codepoints.map(() => 0);
+
+  const numTables = view.getUint16(cmapStart + 2);
+  const subtables: Array<{ offset: number; format: number; priority: number }> = [];
+  for (let i = 0; i < numTables; i++) {
+    const recordStart = cmapStart + 4 + i * 8;
+    if (recordStart + 8 > fontData.byteLength) break;
+
+    const platformId = view.getUint16(recordStart);
+    const encodingId = view.getUint16(recordStart + 2);
+    const offset = cmapStart + view.getUint32(recordStart + 4);
+    if (offset + 2 > fontData.byteLength) continue;
+
+    const format = view.getUint16(offset);
+    const priority =
+      platformId === 3 && encodingId === 10 ? 0 :
+      platformId === 0 && format === 12 ? 1 :
+      platformId === 3 && encodingId === 1 ? 2 :
+      platformId === 0 ? 3 :
+      platformId === 1 && encodingId === 0 ? 4 :
+      5;
+    subtables.push({ offset, format, priority });
+  }
+
+  subtables.sort((a, b) => a.priority - b.priority);
+
+  return codepoints.map(codepoint => {
+    for (const subtable of subtables) {
+      let glyphId: number | null = null;
+      if (subtable.format === 12) glyphId = readGlyphFromCmapFormat12(view, subtable.offset, codepoint);
+      if (subtable.format === 4) glyphId = readGlyphFromCmapFormat4(view, subtable.offset, codepoint);
+      if (subtable.format === 0) glyphId = readGlyphFromCmapFormat0(view, subtable.offset, codepoint);
+      if (glyphId !== null) return glyphId;
+    }
+    return 0;
+  });
+}
+
+async function extractSvgDocument(fontData: Uint8Array, glyphId: number): Promise<SvgGlyphDocument | null> {
   const svgTable = readTableRecords(fontData).get('SVG ');
   if (!svgTable) return null;
 
@@ -190,30 +332,143 @@ async function extractSvgDocument(fontData: Uint8Array, glyphId: number): Promis
     if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
       if (!('DecompressionStream' in window)) return null;
       const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
-      return new Response(stream).text();
+      return { svg: await new Response(stream).text(), glyphId };
     }
 
-    return decoder.decode(bytes);
+    return { svg: decoder.decode(bytes), glyphId };
   }
 
   return null;
 }
 
-function rasterizeSvgDocument(svg: string, fontSize: number, base: number): Promise<GlyphRender | null> {
+function getSvgNumericAttribute(root: SVGSVGElement, name: string): number | null {
+  const value = root.getAttribute(name);
+  if (!value) return null;
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseSvgViewBox(root: SVGSVGElement): DOMRectReadOnly | null {
+  const viewBox = root.getAttribute('viewBox');
+  if (!viewBox) return null;
+  const values = viewBox.trim().split(/[\s,]+/).map(Number);
+  if (values.length !== 4 || values.some(value => !Number.isFinite(value))) return null;
+  const [x, y, width, height] = values;
+  if (width <= 0 || height <= 0) return null;
+  return new DOMRectReadOnly(x, y, width, height);
+}
+
+function isolateSvgGlyph(root: SVGSVGElement, glyphId: number) {
+  const glyphIdAttribute = `glyph${glyphId}`;
+  const glyphElement = Array.from(root.querySelectorAll('[id]')).find(element => element.id === glyphIdAttribute);
+  if (!glyphElement) return;
+
+  const wrapper = root.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'g');
+  wrapper.appendChild(glyphElement.cloneNode(true));
+
+  Array.from(root.children).forEach(child => {
+    if (child.tagName.toLowerCase() !== 'defs') child.remove();
+  });
+  root.appendChild(wrapper);
+}
+
+function measureSvgArtwork(root: SVGSVGElement, fallbackSize: number): DOMRectReadOnly | null {
+  const host = document.createElement('div');
+  host.style.position = 'fixed';
+  host.style.left = '-10000px';
+  host.style.top = '-10000px';
+  host.style.width = '0';
+  host.style.height = '0';
+  host.style.overflow = 'hidden';
+
+  const probe = root.cloneNode(true) as SVGSVGElement;
+  probe.setAttribute('width', String(getSvgNumericAttribute(root, 'width') ?? fallbackSize));
+  probe.setAttribute('height', String(getSvgNumericAttribute(root, 'height') ?? fallbackSize));
+  probe.style.overflow = 'visible';
+  host.appendChild(probe);
+  document.body.appendChild(host);
+
+  try {
+    const bbox = probe.getBBox();
+    if (bbox.width > 0 && bbox.height > 0) return new DOMRectReadOnly(bbox.x, bbox.y, bbox.width, bbox.height);
+  } catch (e) {
+    console.warn('[FontForge] SVG glyph bounds measurement failed:', e);
+  } finally {
+    document.body.removeChild(host);
+  }
+
+  return parseSvgViewBox(root);
+}
+
+function cropTransparentPixels(imageData: ImageData, left = 0, top = 0): GlyphRender | null {
+  const { data, width, height } = imageData;
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (data[(y * width + x) * 4 + 3] === 0) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+
+  if (maxX < minX || maxY < minY) return null;
+
+  const croppedWidth = maxX - minX + 1;
+  const croppedHeight = maxY - minY + 1;
+  const cropped = new Uint8ClampedArray(croppedWidth * croppedHeight * 4);
+  for (let y = 0; y < croppedHeight; y++) {
+    for (let x = 0; x < croppedWidth; x++) {
+      copyPixel(data, cropped, ((y + minY) * width + x + minX) * 4, (y * croppedWidth + x) * 4);
+    }
+  }
+
+  return {
+    imageData: new ImageData(cropped, croppedWidth, croppedHeight),
+    left: left + minX,
+    top: top - minY,
+  };
+}
+
+function rasterizeSvgDocument(documentData: SvgGlyphDocument, fontSize: number, base: number): Promise<GlyphRender | null> {
   return new Promise(resolve => {
     const parser = new DOMParser();
-    const doc = parser.parseFromString(svg, 'image/svg+xml');
-    const root = doc.documentElement;
+    const doc = parser.parseFromString(documentData.svg, 'image/svg+xml');
+    const root = doc.documentElement as SVGSVGElement | null;
     if (!root || root.nodeName.toLowerCase() !== 'svg') {
       resolve(null);
       return;
     }
 
-    root.setAttribute('width', String(fontSize));
-    root.setAttribute('height', String(fontSize));
+    isolateSvgGlyph(root, documentData.glyphId);
+
     if (!root.getAttribute('xmlns')) {
       root.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
     }
+
+    const measuredBox = measureSvgArtwork(root, fontSize);
+    const sourceBox = measuredBox ?? parseSvgViewBox(root) ?? new DOMRectReadOnly(0, 0, fontSize, fontSize);
+    const bleed = Math.max(sourceBox.width, sourceBox.height) * 0.05;
+    const viewBox = new DOMRectReadOnly(
+      sourceBox.x - bleed,
+      sourceBox.y - bleed,
+      sourceBox.width + bleed * 2,
+      sourceBox.height + bleed * 2,
+    );
+    const scale = fontSize / Math.max(viewBox.width, viewBox.height);
+    const renderWidth = Math.max(1, Math.ceil(viewBox.width * scale));
+    const renderHeight = Math.max(1, Math.ceil(viewBox.height * scale));
+
+    root.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`);
+    root.setAttribute('width', String(renderWidth));
+    root.setAttribute('height', String(renderHeight));
+    root.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    root.style.overflow = 'visible';
 
     const serialized = new XMLSerializer().serializeToString(root);
     const url = URL.createObjectURL(new Blob([serialized], { type: 'image/svg+xml' }));
@@ -221,13 +476,14 @@ function rasterizeSvgDocument(svg: string, fontSize: number, base: number): Prom
 
     image.onload = () => {
       const canvas = document.createElement('canvas');
-      canvas.width = fontSize;
-      canvas.height = fontSize;
+      canvas.width = renderWidth;
+      canvas.height = renderHeight;
       const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
-      ctx.clearRect(0, 0, fontSize, fontSize);
-      ctx.drawImage(image, 0, 0, fontSize, fontSize);
+      ctx.clearRect(0, 0, renderWidth, renderHeight);
+      ctx.drawImage(image, 0, 0, renderWidth, renderHeight);
       URL.revokeObjectURL(url);
-      resolve({ imageData: ctx.getImageData(0, 0, fontSize, fontSize), left: 0, top: base });
+      const cropped = cropTransparentPixels(ctx.getImageData(0, 0, renderWidth, renderHeight), 0, base);
+      resolve(cropped);
     };
     image.onerror = () => {
       URL.revokeObjectURL(url);
@@ -250,6 +506,125 @@ function glyphBitmapToRender(bitmap: NativeGlyphBitmap): GlyphRender | null {
     left: bitmap.left,
     top: bitmap.top,
   };
+}
+
+function sanitizeOutputName(name: string, fallback: string): string {
+  const sanitized = name
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+    .replace(/\s+/g, ' ')
+    .replace(/^\.+|\.+$/g, '');
+
+  return sanitized || fallback;
+}
+
+function renameFntOutput(fntContent: string, fontName: string): string {
+  return fntContent
+    .replace(/^info face="[^"]*"/m, () => `info face="${fontName}"`)
+    .replace(/^page id=0 file="[^"]*"/m, () => `page id=0 file="${fontName}_0.png"`);
+}
+
+function parseBmFontAttributes(line: string): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  const attrRegex = /(\w+)=((?:"[^"]*")|\S+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = attrRegex.exec(line)) !== null) {
+    attrs[match[1]] = match[2].replace(/^"|"$/g, '');
+  }
+  return attrs;
+}
+
+function numberAttribute(attrs: Record<string, string>, key: string, fallback = 0): number {
+  const value = Number(attrs[key]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function parseReferenceFnt(content: string, fileName: string): ReferenceFntLayout {
+  const glyphs: CharGlyph[] = [];
+  let lineHeight = 0;
+  let base = 0;
+  let scaleW = 0;
+  let scaleH = 0;
+
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const attrs = parseBmFontAttributes(line);
+
+    if (line.startsWith('common ')) {
+      lineHeight = numberAttribute(attrs, 'lineHeight', lineHeight);
+      base = numberAttribute(attrs, 'base', base);
+      scaleW = numberAttribute(attrs, 'scaleW', scaleW);
+      scaleH = numberAttribute(attrs, 'scaleH', scaleH);
+    }
+
+    if (line.startsWith('char ')) {
+      const id = numberAttribute(attrs, 'id', -1);
+      if (id < 0) continue;
+      glyphs.push({
+        id,
+        char: String.fromCodePoint(id),
+        x: numberAttribute(attrs, 'x'),
+        y: numberAttribute(attrs, 'y'),
+        width: numberAttribute(attrs, 'width'),
+        height: numberAttribute(attrs, 'height'),
+        xoffset: numberAttribute(attrs, 'xoffset'),
+        yoffset: numberAttribute(attrs, 'yoffset'),
+        xadvance: numberAttribute(attrs, 'xadvance'),
+      });
+    }
+  }
+
+  if (glyphs.length === 0 || scaleW <= 0 || scaleH <= 0) {
+    throw new Error('Reference .fnt must contain BMFont common metrics and char entries.');
+  }
+
+  return {
+    name: fileName.replace(/\.fnt$/i, ''),
+    content,
+    glyphs,
+    glyphMap: new Map(glyphs.map(glyph => [glyph.id, glyph])),
+    lineHeight,
+    base,
+    scaleW,
+    scaleH,
+  };
+}
+
+function drawNormalizedGlyphToRect(
+  ctx: CanvasRenderingContext2D,
+  normalized: NormalizedGlyph,
+  target: CharGlyph,
+): ReferenceGlyphPlacement | null {
+  if (target.width <= 0 || target.height <= 0 || normalized.textureWidth <= 0 || normalized.textureHeight <= 0) return null;
+
+  const source = document.createElement('canvas');
+  source.width = normalized.textureWidth;
+  source.height = normalized.textureHeight;
+  const sourceCtx = source.getContext('2d', { willReadFrequently: true })!;
+  const sourceImage = sourceCtx.createImageData(normalized.textureWidth, normalized.textureHeight);
+
+  for (let y = 0; y < normalized.textureHeight; y++) {
+    for (let x = 0; x < normalized.textureWidth; x++) {
+      copyPixel(
+        normalized.imageData.data,
+        sourceImage.data,
+        ((y + normalized.textureY) * normalized.imageData.width + x + normalized.textureX) * 4,
+        (y * normalized.textureWidth + x) * 4,
+      );
+    }
+  }
+
+  sourceCtx.putImageData(sourceImage, 0, 0);
+
+  const scale = Math.min(target.width / normalized.textureWidth, target.height / normalized.textureHeight);
+  const drawWidth = Math.max(1, Math.round(normalized.textureWidth * scale));
+  const drawHeight = Math.max(1, Math.round(normalized.textureHeight * scale));
+  const insetX = Math.round((target.width - drawWidth) / 2);
+  const insetY = Math.round((target.height - drawHeight) / 2);
+
+  ctx.drawImage(source, target.x + insetX, target.y + insetY, drawWidth, drawHeight);
+  return { insetX, insetY };
 }
 
 function colorToRgbaU32(color: string): number {
@@ -303,6 +678,7 @@ function renderGlyph(
 
 export function useFontConverter() {
   const [loadedFont, setLoadedFont] = useState<LoadedFont | null>(null);
+  const [referenceFnt, setReferenceFnt] = useState<ReferenceFntLayout | null>(null);
   const [isConverting, setIsConverting] = useState(false);
   const [result, setResult] = useState<ConversionResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -380,6 +756,34 @@ export function useFontConverter() {
     }
   }, [loadedFont, ensureFontReady]);
 
+  const loadReferenceFnt = useCallback(async (file: File) => {
+    setError(null);
+    setResult(null);
+
+    if (file.name.split('.').pop()?.toLowerCase() !== 'fnt') {
+      setError('Only BMFont .fnt reference files are supported.');
+      return false;
+    }
+
+    try {
+      const content = await file.text();
+      const parsed = parseReferenceFnt(content, file.name);
+      setReferenceFnt(parsed);
+      console.log(`[FontForge] reference .fnt loaded: ${parsed.glyphs.length} chars, ${parsed.scaleW}×${parsed.scaleH}`);
+      return parsed;
+    } catch (e) {
+      console.error('[FontForge] reference .fnt parse error:', e);
+      setReferenceFnt(null);
+      setError('Failed to parse reference .fnt. Make sure it is BMFont text format.');
+      return false;
+    }
+  }, []);
+
+  const clearReferenceFnt = useCallback(() => {
+    setReferenceFnt(null);
+    setResult(null);
+  }, []);
+
   // ── Convert ───────────────────────────────────────────────────────────────
 
   const convert = useCallback(async (config: FontConversionConfig) => {
@@ -398,16 +802,23 @@ export function useFontConverter() {
     await new Promise(r => setTimeout(r, 20));
 
     try {
-      const { fontSize, padding, extrude, spacing, atlasWidth, atlasHeight, color } = config;
+      const { fontSize, padding, extrude, spacing, color } = config;
+      const referenceLayout = referenceFnt;
       const useNativeColors = config.useNativeColors && !!loadedFont?.isColorFont;
-      const chars = CHARSETS[config.charset] ?? config.charset;
-      const charList = Array.from(chars);
+      const charList = referenceLayout
+        ? referenceLayout.glyphs.map(glyph => glyph.char)
+        : Array.from(CHARSETS[config.charset] ?? config.charset);
+      const outputAtlasWidth = referenceLayout?.scaleW ?? config.atlasWidth;
+      const outputAtlasHeight = referenceLayout?.scaleH ?? config.atlasHeight;
       const nativeEngine = loadedFont?.data
         ? await createOptionalNativeFontEngine(loadedFont.data)
         : null;
+      const codepoints = charList.map(char => char.codePointAt(0) ?? 0);
       const nativeGlyphIds = nativeEngine
-        ? nativeEngine.resolveGlyphIndices(charList.map(char => char.codePointAt(0) ?? 0))
-        : [];
+        ? nativeEngine.resolveGlyphIndices(codepoints)
+        : loadedFont?.data
+          ? resolveGlyphIdsFromCmap(loadedFont.data, codepoints)
+          : [];
       const nativeColor = colorToRgbaU32(color);
 
       const active = await ensureFontReady(fontFamily, fontSize);
@@ -442,7 +853,7 @@ export function useFontConverter() {
         const id = char.codePointAt(0) ?? 0;
         const glyphId = nativeGlyphIds[index] ?? 0;
         const textMetrics = mCtx.measureText(char);
-        const svgDocument = nativeEngine && useNativeColors && loadedFont?.tableInfo.hasSVG
+        const svgDocument = useNativeColors && loadedFont?.tableInfo.hasSVG
           ? await extractSvgDocument(loadedFont.data, glyphId)
           : null;
         const bitmap = nativeEngine && useNativeColors && !svgDocument
@@ -472,53 +883,71 @@ export function useFontConverter() {
       // ── 2. Pack glyphs into the atlas canvas ──────────────────────────────
 
       const atlas = document.createElement('canvas');
-      atlas.width  = atlasWidth;
-      atlas.height = atlasHeight;
+      atlas.width  = outputAtlasWidth;
+      atlas.height = outputAtlasHeight;
       const actx = atlas.getContext('2d')!;
-      actx.clearRect(0, 0, atlasWidth, atlasHeight);
+      actx.clearRect(0, 0, outputAtlasWidth, outputAtlasHeight);
 
       const glyphs: CharGlyph[] = [];
-      let cx = totalPadding;
-      let cy = totalPadding;
-      let rowH = lineHeight + totalPadding * 2;
+      if (referenceLayout) {
+        for (const { id, normalized, xadvance } of entries) {
+          const referenceGlyph = referenceLayout.glyphMap.get(id);
+          if (!referenceGlyph) continue;
 
-      for (const { char, id, normalized, xadvance } of entries) {
-        if (!normalized) {
-          glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
-          continue;
+          const placement = normalized
+            ? drawNormalizedGlyphToRect(actx, normalized, referenceGlyph)
+            : null;
+
+          glyphs.push({
+            ...referenceGlyph,
+            xoffset: normalized ? normalized.xoffset - (placement?.insetX ?? 0) : referenceGlyph.xoffset,
+            yoffset: normalized ? normalized.yoffset - (placement?.insetY ?? 0) : referenceGlyph.yoffset,
+            xadvance,
+          });
         }
+      } else {
+        let cx = totalPadding;
+        let cy = totalPadding;
+        let rowH = lineHeight + totalPadding * 2;
 
-        const gw = normalized.imageData.width;
-        const gh = normalized.imageData.height;
+        for (const { char, id, normalized, xadvance } of entries) {
+          if (!normalized) {
+            glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
+            continue;
+          }
 
-        if (cx + gw > atlasWidth - totalPadding) {
-          cx = totalPadding;
-          cy += rowH + spacing;
-          rowH = lineHeight + totalPadding * 2;
+          const gw = normalized.imageData.width;
+          const gh = normalized.imageData.height;
+
+          if (cx + gw > outputAtlasWidth - totalPadding) {
+            cx = totalPadding;
+            cy += rowH + spacing;
+            rowH = lineHeight + totalPadding * 2;
+          }
+
+          if (cy + gh > outputAtlasHeight) {
+            console.warn(`[FontForge] atlas full — '${char}' skipped`);
+            glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
+            continue;
+          }
+
+          actx.putImageData(normalized.imageData, cx, cy);
+
+          glyphs.push({
+            id,
+            char,
+            x: cx + normalized.textureX,
+            y: cy + normalized.textureY,
+            width: normalized.textureWidth,
+            height: normalized.textureHeight,
+            xoffset: normalized.xoffset,
+            yoffset: normalized.yoffset,
+            xadvance,
+          });
+
+          cx += gw + spacing;
+          rowH = Math.max(rowH, gh);
         }
-
-        if (cy + gh > atlasHeight) {
-          console.warn(`[FontForge] atlas full — '${char}' skipped`);
-          glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
-          continue;
-        }
-
-        actx.putImageData(normalized.imageData, cx, cy);
-
-        glyphs.push({
-          id,
-          char,
-          x: cx,
-          y: cy,
-          width: gw,
-          height: gh,
-          xoffset: normalized.xoffset,
-          yoffset: normalized.yoffset,
-          xadvance,
-        });
-
-        cx += gw + spacing;
-        rowH = Math.max(rowH, gh);
       }
 
       // ── 3. Generate the .fnt text ─────────────────────────────────────────
@@ -529,7 +958,7 @@ export function useFontConverter() {
         ` padding=${totalPadding},${totalPadding},${totalPadding},${totalPadding} spacing=${spacing},${spacing}`
       );
       lines.push(
-        `common lineHeight=${lineHeight} base=${base} scaleW=${atlasWidth} scaleH=${atlasHeight} pages=1 packed=0`
+        `common lineHeight=${lineHeight} base=${base} scaleW=${outputAtlasWidth} scaleH=${outputAtlasHeight} pages=1 packed=0`
       );
       lines.push(`page id=0 file="${fontName}_0.png"`);
       lines.push(`chars count=${glyphs.length}`);
@@ -545,6 +974,7 @@ export function useFontConverter() {
       }
 
       const fntContent = lines.join('\n');
+
       const atlasDataUrl = atlas.toDataURL('image/png');
 
       const packed = glyphs.filter(g => g.width > 0).length;
@@ -557,7 +987,7 @@ export function useFontConverter() {
     } finally {
       setIsConverting(false);
     }
-  }, [loadedFont, ensureFontReady]);
+  }, [loadedFont, referenceFnt, ensureFontReady]);
 
   // ── Downloads ─────────────────────────────────────────────────────────────
 
@@ -590,16 +1020,32 @@ export function useFontConverter() {
     setTimeout(downloadAtlas, 350);
   }, [result, downloadFnt, downloadAtlas]);
 
+  const updateOutputName = useCallback((name: string) => {
+    setResult(prev => {
+      if (!prev) return prev;
+      const fontName = sanitizeOutputName(name, prev.fontName);
+      return {
+        ...prev,
+        fontName,
+        fntContent: renameFntOutput(prev.fntContent, fontName),
+      };
+    });
+  }, []);
+
   return {
     loadedFont,
+    referenceFnt,
     isConverting,
     result,
     error,
     loadFont,
+    loadReferenceFnt,
+    clearReferenceFnt,
     convert,
     downloadFnt,
     downloadAtlas,
     downloadZip,
+    updateOutputName,
     previewFontFamily: fontFamilyRef.current,
   };
 }
