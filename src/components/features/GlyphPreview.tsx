@@ -49,7 +49,7 @@ export function GlyphPreview({ result, fontFamily, fontSize }: GlyphPreviewProps
                   fontSize: '14px',
                   color: '#ffffff',
                 }}
-                title={`id=${g.id} '${g.char}' ${g.width}×${g.height} adv=${g.xadvance}`}
+                title={`id=${g.id} '${g.char}' page=${g.page} x=${g.x} y=${g.y} ${g.width}×${g.height} adv=${g.xadvance}`}
               >
                 {g.char === ' ' ? '␣' : g.char}
               </div>
