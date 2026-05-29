@@ -97,6 +97,10 @@ interface GlyphRender {
 
 interface NormalizedGlyph {
   imageData: ImageData;
+  textureX: number;
+  textureY: number;
+  textureWidth: number;
+  textureHeight: number;
   xoffset: number;
   yoffset: number;
 }
@@ -148,8 +152,12 @@ function normalizeGlyphBitmap(render: GlyphRender, padding: number, extrude: num
 
   return {
     imageData: new ImageData(dst, dstWidth, dstHeight),
-    xoffset: Math.round(render.left) - border,
-    yoffset: base - Math.round(render.top) - border,
+    textureX: border,
+    textureY: border,
+    textureWidth: src.width,
+    textureHeight: src.height,
+    xoffset: Math.round(render.left),
+    yoffset: base - Math.round(render.top),
   };
 }
 
@@ -743,10 +751,10 @@ export function useFontConverter() {
         glyphs.push({
           id,
           char,
-          x: cx,
-          y: cy,
-          width: gw,
-          height: gh,
+          x: cx + normalized.textureX,
+          y: cy + normalized.textureY,
+          width: normalized.textureWidth,
+          height: normalized.textureHeight,
           xoffset: normalized.xoffset,
           yoffset: normalized.yoffset,
           xadvance,
