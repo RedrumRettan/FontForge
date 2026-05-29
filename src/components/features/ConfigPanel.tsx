@@ -78,6 +78,23 @@ export function ConfigPanel({ config, onChange, isColorFont = false }: ConfigPan
         />
       </div>
 
+
+      {/* Edge Extrude */}
+      <div className="space-y-2">
+        <div className="flex justify-between">
+          <Label className="text-xs text-muted-foreground uppercase tracking-wider">Edge Extrude</Label>
+          <span className="mono text-xs text-primary font-semibold">{config.extrude}px</span>
+        </div>
+        <Slider
+          min={0}
+          max={2}
+          step={1}
+          value={[config.extrude]}
+          onValueChange={([v]) => update({ extrude: v })}
+        />
+        <p className="text-xs text-muted-foreground">Duplicates glyph edge pixels for mip-safe sampling.</p>
+      </div>
+
       {/* Spacing */}
       <div className="space-y-2">
         <div className="flex justify-between">
