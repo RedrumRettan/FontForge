@@ -1,6 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import { FontConversionConfig, ConversionResult, CharGlyph, CHARSETS, FontTableInfo, AtlasPage } from '@/types/font';
-import { packMaxRects } from '@/lib/maxRectsPacker';
+import { FontConversionConfig, ConversionResult, CharGlyph, CHARSETS, FontTableInfo } from '@/types/font';
 import { createNativeFontEngine, NativeGlyphBitmap } from '@/native/fontEngine';
 
 interface LoadedFont {
@@ -159,7 +158,7 @@ async function extractSvgDocument(fontData: Uint8Array, glyphId: number): Promis
     const bytes = fontData.subarray(docStart, docEnd);
     if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
       if (!('DecompressionStream' in window)) return null;
-      const stream = new Blob([bytes.slice().buffer]).stream().pipeThrough(new DecompressionStream('gzip'));
+      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
       return new Response(stream).text();
     }
 
@@ -238,7 +237,7 @@ function renderGlyph(
   fontFamily: string,
   fontSize: number,
   color: string,
-): GlyphRender | null {
+): Promise<GlyphRender | null> {
   // Oversized canvas so glyphs with extreme descenders/ascenders fit
   const margin = Math.ceil(fontSize * 1.5);
   const cw = Math.ceil(fontSize * 3);
@@ -362,7 +361,7 @@ export function useFontConverter() {
     await new Promise(r => setTimeout(r, 20));
 
     try {
-      const { fontSize, padding, spacing, border, atlasWidth, atlasHeight, color } = config;
+      const { fontSize, padding, spacing, atlasWidth, atlasHeight, color } = config;
       const useNativeColors = config.useNativeColors && !!loadedFont?.isColorFont;
       const chars = CHARSETS[config.charset] ?? config.charset;
       const charList = Array.from(chars);
@@ -431,61 +430,71 @@ export function useFontConverter() {
 
       console.log(`[FontForge] lineHeight=${lineHeight} base=${base} (ascent=${globalAscent} descent=${globalDescent})`);
 
-      // ── 2. Pack glyphs into one or more atlas canvases ────────────────────
+      // ── 2. Pack glyphs into the atlas canvas ──────────────────────────────
 
-      const visibleEntries = entries
-        .map((entry, index) => ({ entry, index }))
-        .filter(({ entry }) => entry.render);
-      const packResult = packMaxRects(
-        visibleEntries.map(({ entry, index }) => ({
-          id: index,
-          width: entry.render?.imageData.width ?? 0,
-          height: entry.render?.imageData.height ?? 0,
-        })),
-        { width: atlasWidth, height: atlasHeight, padding, border, spacing },
-      );
-      const placementsByIndex = new Map(packResult.placements.map(placement => [placement.id, placement]));
-      const pageCount = Math.max(1, packResult.stats.pages);
-      const atlases = Array.from({ length: pageCount }, () => {
-        const atlas = document.createElement('canvas');
-        atlas.width = atlasWidth;
-        atlas.height = atlasHeight;
-        const ctx = atlas.getContext('2d')!;
-        ctx.clearRect(0, 0, atlasWidth, atlasHeight);
-        return { atlas, ctx };
-      });
+      const atlas = document.createElement('canvas');
+      atlas.width  = atlasWidth;
+      atlas.height = atlasHeight;
+      const actx = atlas.getContext('2d')!;
+      actx.clearRect(0, 0, atlasWidth, atlasHeight);
 
       const glyphs: CharGlyph[] = [];
+      let cx = padding;   // cursor x
+      let cy = padding;   // cursor y (top of current row)
 
-      for (const [index, { char, id, render, xadvance }] of entries.entries()) {
+      // Each row is tall enough to hold the tallest glyph + padding on both sides
+      const rowH = lineHeight + padding * 2;
+
+      for (const { char, id, render, xadvance } of entries) {
         if (!render) {
-          // Invisible char (space, zero-width, etc.) — emit with zero size.
-          glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance, page: 0 });
+          // Invisible char (space, zero-width, etc.) — emit with zero size
+          glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
           continue;
         }
 
-        const placement = placementsByIndex.get(index);
-        if (!placement) {
-          throw new Error(`Glyph '${char}' was rendered but not packed`);
+        const gw = render.imageData.width;
+        const gh = render.imageData.height;
+
+        // Cell width = glyph pixels + padding on each side
+        const cellW = gw + padding * 2;
+
+        // Wrap to next row if needed
+        if (cx + cellW > atlasWidth - padding) {
+          cx = padding;
+          cy += rowH + spacing;
         }
 
-        atlases[placement.page].ctx.putImageData(render.imageData, placement.x, placement.y);
+        if (cy + rowH > atlasHeight) {
+          console.warn(`[FontForge] atlas full — '${char}' skipped`);
+          // Still push the glyph with 0 coords so the FNT char count is accurate
+          glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
+          continue;
+        }
+
+        // Where this glyph's pixels land in the atlas
+        const atlasX = cx + padding;
+        // Vertically align glyphs to a shared baseline:
+        // top of cell + padding + (globalAscent - this glyph's ascent)
+        const atlasY = cy + padding + (globalAscent - render.ascent);
+
+        actx.putImageData(render.imageData, atlasX, atlasY);
 
         glyphs.push({
           id,
           char,
-          x: placement.x,
-          y: placement.y,
-          width: render.imageData.width,
-          height: render.imageData.height,
-          // xoffset: shift applied by the renderer when drawing from cursor.
-          // If the glyph pixels start to the right of the draw point, xoffset > 0.
+          x: atlasX,
+          y: atlasY,
+          width:  gw,
+          height: gh,
+          // xoffset: shift applied by the renderer when drawing from cursor
+          // If the glyph pixels start to the right of the draw point, xoffset > 0
           xoffset: render.xoffset,
-          // yoffset: distance from the top of the line to the top of the glyph crop.
+          // yoffset: distance from the top of the line to the top of the glyph crop
           yoffset: globalAscent - render.ascent,
           xadvance,
-          page: placement.page,
         });
+
+        cx += cellW + spacing;
       }
 
       // ── 3. Generate the .fnt text ─────────────────────────────────────────
@@ -496,16 +505,9 @@ export function useFontConverter() {
         ` padding=${padding},${padding},${padding},${padding} spacing=${spacing},${spacing}`
       );
       lines.push(
-        `common lineHeight=${lineHeight} base=${base} scaleW=${atlasWidth} scaleH=${atlasHeight} pages=${pageCount} packed=0`
+        `common lineHeight=${lineHeight} base=${base} scaleW=${atlasWidth} scaleH=${atlasHeight} pages=1 packed=0`
       );
-      const atlasPages: AtlasPage[] = atlases.map(({ atlas }, page) => ({
-        id: page,
-        fileName: `${fontName}_${page}.png`,
-        dataUrl: atlas.toDataURL('image/png'),
-      }));
-      for (const page of atlasPages) {
-        lines.push(`page id=${page.id} file="${page.fileName}"`);
-      }
+      lines.push(`page id=0 file="${fontName}_0.png"`);
       lines.push(`chars count=${glyphs.length}`);
 
       for (const g of glyphs) {
@@ -514,33 +516,17 @@ export function useFontConverter() {
           `x=${g.x} y=${g.y} ` +
           `width=${g.width} height=${g.height} ` +
           `xoffset=${g.xoffset} yoffset=${g.yoffset} ` +
-          `xadvance=${g.xadvance} page=${g.page} chnl=15`
+          `xadvance=${g.xadvance} page=0 chnl=15`
         );
       }
 
       const fntContent = lines.join('\n');
-      const atlasDataUrl = atlasPages[0]?.dataUrl ?? '';
-      const packingStats = {
-        ...packResult.stats,
-        pages: pageCount,
-        usableArea: packResult.stats.usableArea || Math.max(0, atlasWidth - border * 2) * Math.max(0, atlasHeight - border * 2),
-        pageStats: packResult.stats.pageStats.length > 0
-          ? packResult.stats.pageStats
-          : [{
-            page: 0,
-            width: atlasWidth,
-            height: atlasHeight,
-            rects: 0,
-            usedArea: 0,
-            usableArea: Math.max(0, atlasWidth - border * 2) * Math.max(0, atlasHeight - border * 2),
-            occupancy: 0,
-          }],
-      };
+      const atlasDataUrl = atlas.toDataURL('image/png');
 
       const packed = glyphs.filter(g => g.width > 0).length;
-      console.log(`[FontForge] done — ${packed}/${glyphs.length} glyphs packed across ${packingStats.pages} page(s), occupancy=${Math.round(packingStats.occupancy * 100)}%`);
+      console.log(`[FontForge] done — ${packed}/${glyphs.length} glyphs packed`);
 
-      setResult({ fntContent, atlasDataUrl, atlasPages, glyphs, packingStats, fontName, lineHeight, base });
+      setResult({ fntContent, atlasDataUrl, glyphs, fontName, lineHeight, base });
     } catch (e) {
       console.error('[FontForge] convert error:', e);
       setError('Conversion failed — check the browser console for details.');
@@ -564,33 +550,21 @@ export function useFontConverter() {
     URL.revokeObjectURL(url);
   }, [result]);
 
-  const downloadAtlasPages = useCallback((initialDelay: number) => {
-    if (!result) return;
-    const pages = result.atlasPages.length > 0
-      ? result.atlasPages
-      : [{ id: 0, fileName: `${result.fontName}_0.png`, dataUrl: result.atlasDataUrl }];
-
-    pages.forEach((page, index) => {
-      setTimeout(() => {
-        const a = document.createElement('a');
-        a.href = page.dataUrl;
-        a.download = page.fileName;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-      }, initialDelay + 350 * index);
-    });
-  }, [result]);
-
   const downloadAtlas = useCallback(() => {
-    downloadAtlasPages(0);
-  }, [downloadAtlasPages]);
+    if (!result) return;
+    const a = document.createElement('a');
+    a.href = result.atlasDataUrl;
+    a.download = `${result.fontName}_0.png`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }, [result]);
 
   const downloadZip = useCallback(() => {
     if (!result) return;
     downloadFnt();
-    downloadAtlasPages(350);
-  }, [result, downloadFnt, downloadAtlasPages]);
+    setTimeout(downloadAtlas, 350);
+  }, [result, downloadFnt, downloadAtlas]);
 
   return {
     loadedFont,

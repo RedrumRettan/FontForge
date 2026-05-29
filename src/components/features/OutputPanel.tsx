@@ -19,7 +19,7 @@ export function OutputPanel({ result, onDownloadFnt, onDownloadAtlas, onDownload
   return (
     <div className="space-y-4">
       {/* Stats Row */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <div className="grid grid-cols-3 gap-3">
         <div className="bg-secondary rounded-lg p-3 border border-border">
           <p className="text-xs text-muted-foreground">Glyphs</p>
           <p className="mono text-lg font-semibold text-primary">{result.glyphs.length}</p>
@@ -31,12 +31,6 @@ export function OutputPanel({ result, onDownloadFnt, onDownloadAtlas, onDownload
         <div className="bg-secondary rounded-lg p-3 border border-border">
           <p className="text-xs text-muted-foreground">Base</p>
           <p className="mono text-lg font-semibold text-foreground">{result.base}px</p>
-        </div>
-        <div className="bg-secondary rounded-lg p-3 border border-border">
-          <p className="text-xs text-muted-foreground">Pages / Fill</p>
-          <p className="mono text-lg font-semibold text-foreground">
-            {result.packingStats.pages} / {Math.round(result.packingStats.occupancy * 100)}%
-          </p>
         </div>
       </div>
 
@@ -87,24 +81,15 @@ export function OutputPanel({ result, onDownloadFnt, onDownloadAtlas, onDownload
                 : '#000000',
             }}
           >
-            <div className="space-y-3 p-2">
-              {result.atlasPages.map((page) => (
-                <div key={page.id} className="space-y-1">
-                  <img
-                    src={page.dataUrl}
-                    alt={`Font Atlas page ${page.id}`}
-                    className="max-w-full"
-                    style={{ imageRendering: 'pixelated' }}
-                  />
-                  <p className="text-xs text-muted-foreground mono">
-                    {page.fileName} · {result.packingStats.pageStats[page.id]?.rects ?? 0} glyphs · {Math.round((result.packingStats.pageStats[page.id]?.occupancy ?? 0) * 100)}% full
-                  </p>
-                </div>
-              ))}
-            </div>
+            <img
+              src={result.atlasDataUrl}
+              alt="Font Atlas"
+              className="max-w-full"
+              style={{ imageRendering: 'pixelated' }}
+            />
           </div>
           <p className="text-xs text-muted-foreground mono">
-            {result.atlasPages.map(page => page.fileName).join(', ')}
+            {result.fontName}_0.png
           </p>
         </div>
       ) : (
@@ -127,7 +112,7 @@ export function OutputPanel({ result, onDownloadFnt, onDownloadAtlas, onDownload
           className="bg-primary text-primary-foreground hover:bg-primary/90 font-semibold gap-2 h-11"
         >
           <Package className="w-4 h-4" />
-          Download Files (.fnt + {result.packingStats.pages} .png{result.packingStats.pages === 1 ? '' : 's'})
+          Download Both Files (.fnt + .png)
         </Button>
         <div className="grid grid-cols-2 gap-2">
           <Button
@@ -144,7 +129,7 @@ export function OutputPanel({ result, onDownloadFnt, onDownloadAtlas, onDownload
             className="gap-2 text-sm border-border hover:bg-secondary"
           >
             <Download className="w-4 h-4 text-primary" />
-            atlas .png{result.packingStats.pages === 1 ? '' : 's'}
+            .png only
           </Button>
         </div>
       </div>

@@ -93,22 +93,6 @@ export function ConfigPanel({ config, onChange, isColorFont = false }: ConfigPan
         />
       </div>
 
-      {/* Border */}
-      <div className="space-y-2">
-        <div className="flex justify-between">
-          <Label className="text-xs text-muted-foreground uppercase tracking-wider">Atlas Border</Label>
-          <span className="mono text-xs text-primary font-semibold">{config.border}px</span>
-        </div>
-        <Slider
-          min={0}
-          max={32}
-          step={1}
-          value={[config.border]}
-          onValueChange={([v]) => update({ border: v })}
-        />
-        <p className="text-xs text-muted-foreground">Empty inset kept around every atlas page.</p>
-      </div>
-
       {/* Atlas Size */}
       <div className="space-y-2">
         <Label className="text-xs text-muted-foreground uppercase tracking-wider">Atlas Dimensions</Label>
