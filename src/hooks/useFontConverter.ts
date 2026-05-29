@@ -101,6 +101,11 @@ interface NormalizedGlyph {
   yoffset: number;
 }
 
+interface SvgGlyphDocument {
+  svg: string;
+  glyphId: number;
+}
+
 function copyPixel(src: Uint8ClampedArray, dst: Uint8ClampedArray, srcIndex: number, dstIndex: number) {
   dst[dstIndex] = src[srcIndex];
   dst[dstIndex + 1] = src[srcIndex + 1];
@@ -157,7 +162,120 @@ function browserFontLineMetrics(ctx: CanvasRenderingContext2D, fontSize: number)
   };
 }
 
-async function extractSvgDocument(fontData: Uint8Array, glyphId: number): Promise<string | null> {
+function readGlyphFromCmapFormat0(view: DataView, subtableStart: number, codepoint: number): number | null {
+  if (codepoint < 0 || codepoint > 255 || subtableStart + 262 > view.byteLength) return null;
+  return view.getUint8(subtableStart + 6 + codepoint);
+}
+
+function readGlyphFromCmapFormat4(view: DataView, subtableStart: number, codepoint: number): number | null {
+  if (codepoint < 0 || codepoint > 0xffff || subtableStart + 16 > view.byteLength) return null;
+
+  const length = view.getUint16(subtableStart + 2);
+  const subtableEnd = subtableStart + length;
+  if (subtableEnd > view.byteLength) return null;
+
+  const segCount = view.getUint16(subtableStart + 6) / 2;
+  const endCodeStart = subtableStart + 14;
+  const startCodeStart = endCodeStart + segCount * 2 + 2;
+  const idDeltaStart = startCodeStart + segCount * 2;
+  const idRangeOffsetStart = idDeltaStart + segCount * 2;
+  if (idRangeOffsetStart + segCount * 2 > subtableEnd) return null;
+
+  for (let i = 0; i < segCount; i++) {
+    const endCode = view.getUint16(endCodeStart + i * 2);
+    const startCode = view.getUint16(startCodeStart + i * 2);
+    if (codepoint < startCode || codepoint > endCode) continue;
+
+    const idDelta = view.getInt16(idDeltaStart + i * 2);
+    const idRangeOffsetAddress = idRangeOffsetStart + i * 2;
+    const idRangeOffset = view.getUint16(idRangeOffsetAddress);
+    if (idRangeOffset === 0) {
+      return (codepoint + idDelta) & 0xffff;
+    }
+
+    const glyphIndexAddress = idRangeOffsetAddress + idRangeOffset + (codepoint - startCode) * 2;
+    if (glyphIndexAddress + 2 > subtableEnd) return null;
+    const glyphIndex = view.getUint16(glyphIndexAddress);
+    return glyphIndex === 0 ? 0 : (glyphIndex + idDelta) & 0xffff;
+  }
+
+  return null;
+}
+
+function readGlyphFromCmapFormat12(view: DataView, subtableStart: number, codepoint: number): number | null {
+  if (subtableStart + 16 > view.byteLength) return null;
+
+  const length = view.getUint32(subtableStart + 4);
+  const subtableEnd = subtableStart + length;
+  if (subtableEnd > view.byteLength) return null;
+
+  const groupCount = view.getUint32(subtableStart + 12);
+  let lo = 0;
+  let hi = groupCount - 1;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const groupStart = subtableStart + 16 + mid * 12;
+    if (groupStart + 12 > subtableEnd) return null;
+
+    const startCharCode = view.getUint32(groupStart);
+    const endCharCode = view.getUint32(groupStart + 4);
+    if (codepoint < startCharCode) {
+      hi = mid - 1;
+    } else if (codepoint > endCharCode) {
+      lo = mid + 1;
+    } else {
+      return view.getUint32(groupStart + 8) + codepoint - startCharCode;
+    }
+  }
+
+  return null;
+}
+
+function resolveGlyphIdsFromCmap(fontData: Uint8Array, codepoints: number[]): number[] {
+  const cmapTable = readTableRecords(fontData).get('cmap');
+  if (!cmapTable) return codepoints.map(() => 0);
+
+  const view = new DataView(fontData.buffer, fontData.byteOffset, fontData.byteLength);
+  const cmapStart = cmapTable.offset;
+  if (cmapStart + 4 > fontData.byteLength) return codepoints.map(() => 0);
+
+  const numTables = view.getUint16(cmapStart + 2);
+  const subtables: Array<{ offset: number; format: number; priority: number }> = [];
+  for (let i = 0; i < numTables; i++) {
+    const recordStart = cmapStart + 4 + i * 8;
+    if (recordStart + 8 > fontData.byteLength) break;
+
+    const platformId = view.getUint16(recordStart);
+    const encodingId = view.getUint16(recordStart + 2);
+    const offset = cmapStart + view.getUint32(recordStart + 4);
+    if (offset + 2 > fontData.byteLength) continue;
+
+    const format = view.getUint16(offset);
+    const priority =
+      platformId === 3 && encodingId === 10 ? 0 :
+      platformId === 0 && format === 12 ? 1 :
+      platformId === 3 && encodingId === 1 ? 2 :
+      platformId === 0 ? 3 :
+      platformId === 1 && encodingId === 0 ? 4 :
+      5;
+    subtables.push({ offset, format, priority });
+  }
+
+  subtables.sort((a, b) => a.priority - b.priority);
+
+  return codepoints.map(codepoint => {
+    for (const subtable of subtables) {
+      let glyphId: number | null = null;
+      if (subtable.format === 12) glyphId = readGlyphFromCmapFormat12(view, subtable.offset, codepoint);
+      if (subtable.format === 4) glyphId = readGlyphFromCmapFormat4(view, subtable.offset, codepoint);
+      if (subtable.format === 0) glyphId = readGlyphFromCmapFormat0(view, subtable.offset, codepoint);
+      if (glyphId !== null) return glyphId;
+    }
+    return 0;
+  });
+}
+
+async function extractSvgDocument(fontData: Uint8Array, glyphId: number): Promise<SvgGlyphDocument | null> {
   const svgTable = readTableRecords(fontData).get('SVG ');
   if (!svgTable) return null;
 
@@ -190,30 +308,143 @@ async function extractSvgDocument(fontData: Uint8Array, glyphId: number): Promis
     if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
       if (!('DecompressionStream' in window)) return null;
       const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
-      return new Response(stream).text();
+      return { svg: await new Response(stream).text(), glyphId };
     }
 
-    return decoder.decode(bytes);
+    return { svg: decoder.decode(bytes), glyphId };
   }
 
   return null;
 }
 
-function rasterizeSvgDocument(svg: string, fontSize: number, base: number): Promise<GlyphRender | null> {
+function getSvgNumericAttribute(root: SVGSVGElement, name: string): number | null {
+  const value = root.getAttribute(name);
+  if (!value) return null;
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseSvgViewBox(root: SVGSVGElement): DOMRectReadOnly | null {
+  const viewBox = root.getAttribute('viewBox');
+  if (!viewBox) return null;
+  const values = viewBox.trim().split(/[\s,]+/).map(Number);
+  if (values.length !== 4 || values.some(value => !Number.isFinite(value))) return null;
+  const [x, y, width, height] = values;
+  if (width <= 0 || height <= 0) return null;
+  return new DOMRectReadOnly(x, y, width, height);
+}
+
+function isolateSvgGlyph(root: SVGSVGElement, glyphId: number) {
+  const glyphIdAttribute = `glyph${glyphId}`;
+  const glyphElement = Array.from(root.querySelectorAll('[id]')).find(element => element.id === glyphIdAttribute);
+  if (!glyphElement) return;
+
+  const wrapper = root.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'g');
+  wrapper.appendChild(glyphElement.cloneNode(true));
+
+  Array.from(root.children).forEach(child => {
+    if (child.tagName.toLowerCase() !== 'defs') child.remove();
+  });
+  root.appendChild(wrapper);
+}
+
+function measureSvgArtwork(root: SVGSVGElement, fallbackSize: number): DOMRectReadOnly | null {
+  const host = document.createElement('div');
+  host.style.position = 'fixed';
+  host.style.left = '-10000px';
+  host.style.top = '-10000px';
+  host.style.width = '0';
+  host.style.height = '0';
+  host.style.overflow = 'hidden';
+
+  const probe = root.cloneNode(true) as SVGSVGElement;
+  probe.setAttribute('width', String(getSvgNumericAttribute(root, 'width') ?? fallbackSize));
+  probe.setAttribute('height', String(getSvgNumericAttribute(root, 'height') ?? fallbackSize));
+  probe.style.overflow = 'visible';
+  host.appendChild(probe);
+  document.body.appendChild(host);
+
+  try {
+    const bbox = probe.getBBox();
+    if (bbox.width > 0 && bbox.height > 0) return new DOMRectReadOnly(bbox.x, bbox.y, bbox.width, bbox.height);
+  } catch (e) {
+    console.warn('[FontForge] SVG glyph bounds measurement failed:', e);
+  } finally {
+    document.body.removeChild(host);
+  }
+
+  return parseSvgViewBox(root);
+}
+
+function cropTransparentPixels(imageData: ImageData, left = 0, top = 0): GlyphRender | null {
+  const { data, width, height } = imageData;
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (data[(y * width + x) * 4 + 3] === 0) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+
+  if (maxX < minX || maxY < minY) return null;
+
+  const croppedWidth = maxX - minX + 1;
+  const croppedHeight = maxY - minY + 1;
+  const cropped = new Uint8ClampedArray(croppedWidth * croppedHeight * 4);
+  for (let y = 0; y < croppedHeight; y++) {
+    for (let x = 0; x < croppedWidth; x++) {
+      copyPixel(data, cropped, ((y + minY) * width + x + minX) * 4, (y * croppedWidth + x) * 4);
+    }
+  }
+
+  return {
+    imageData: new ImageData(cropped, croppedWidth, croppedHeight),
+    left: left + minX,
+    top: top - minY,
+  };
+}
+
+function rasterizeSvgDocument(documentData: SvgGlyphDocument, fontSize: number, base: number): Promise<GlyphRender | null> {
   return new Promise(resolve => {
     const parser = new DOMParser();
-    const doc = parser.parseFromString(svg, 'image/svg+xml');
-    const root = doc.documentElement;
+    const doc = parser.parseFromString(documentData.svg, 'image/svg+xml');
+    const root = doc.documentElement as SVGSVGElement | null;
     if (!root || root.nodeName.toLowerCase() !== 'svg') {
       resolve(null);
       return;
     }
 
-    root.setAttribute('width', String(fontSize));
-    root.setAttribute('height', String(fontSize));
+    isolateSvgGlyph(root, documentData.glyphId);
+
     if (!root.getAttribute('xmlns')) {
       root.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
     }
+
+    const measuredBox = measureSvgArtwork(root, fontSize);
+    const sourceBox = measuredBox ?? parseSvgViewBox(root) ?? new DOMRectReadOnly(0, 0, fontSize, fontSize);
+    const bleed = Math.max(sourceBox.width, sourceBox.height) * 0.05;
+    const viewBox = new DOMRectReadOnly(
+      sourceBox.x - bleed,
+      sourceBox.y - bleed,
+      sourceBox.width + bleed * 2,
+      sourceBox.height + bleed * 2,
+    );
+    const scale = fontSize / Math.max(viewBox.width, viewBox.height);
+    const renderWidth = Math.max(1, Math.ceil(viewBox.width * scale));
+    const renderHeight = Math.max(1, Math.ceil(viewBox.height * scale));
+
+    root.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`);
+    root.setAttribute('width', String(renderWidth));
+    root.setAttribute('height', String(renderHeight));
+    root.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    root.style.overflow = 'visible';
 
     const serialized = new XMLSerializer().serializeToString(root);
     const url = URL.createObjectURL(new Blob([serialized], { type: 'image/svg+xml' }));
@@ -221,13 +452,14 @@ function rasterizeSvgDocument(svg: string, fontSize: number, base: number): Prom
 
     image.onload = () => {
       const canvas = document.createElement('canvas');
-      canvas.width = fontSize;
-      canvas.height = fontSize;
+      canvas.width = renderWidth;
+      canvas.height = renderHeight;
       const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
-      ctx.clearRect(0, 0, fontSize, fontSize);
-      ctx.drawImage(image, 0, 0, fontSize, fontSize);
+      ctx.clearRect(0, 0, renderWidth, renderHeight);
+      ctx.drawImage(image, 0, 0, renderWidth, renderHeight);
       URL.revokeObjectURL(url);
-      resolve({ imageData: ctx.getImageData(0, 0, fontSize, fontSize), left: 0, top: base });
+      const cropped = cropTransparentPixels(ctx.getImageData(0, 0, renderWidth, renderHeight), 0, base);
+      resolve(cropped);
     };
     image.onerror = () => {
       URL.revokeObjectURL(url);
@@ -405,9 +637,12 @@ export function useFontConverter() {
       const nativeEngine = loadedFont?.data
         ? await createOptionalNativeFontEngine(loadedFont.data)
         : null;
+      const codepoints = charList.map(char => char.codePointAt(0) ?? 0);
       const nativeGlyphIds = nativeEngine
-        ? nativeEngine.resolveGlyphIndices(charList.map(char => char.codePointAt(0) ?? 0))
-        : [];
+        ? nativeEngine.resolveGlyphIndices(codepoints)
+        : loadedFont?.data
+          ? resolveGlyphIdsFromCmap(loadedFont.data, codepoints)
+          : [];
       const nativeColor = colorToRgbaU32(color);
 
       const active = await ensureFontReady(fontFamily, fontSize);
@@ -442,7 +677,7 @@ export function useFontConverter() {
         const id = char.codePointAt(0) ?? 0;
         const glyphId = nativeGlyphIds[index] ?? 0;
         const textMetrics = mCtx.measureText(char);
-        const svgDocument = nativeEngine && useNativeColors && loadedFont?.tableInfo.hasSVG
+        const svgDocument = useNativeColors && loadedFont?.tableInfo.hasSVG
           ? await extractSvgDocument(loadedFont.data, glyphId)
           : null;
         const bitmap = nativeEngine && useNativeColors && !svgDocument
