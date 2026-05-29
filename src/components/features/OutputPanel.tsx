@@ -1,23 +1,58 @@
 import { ConversionResult } from '@/types/font';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Download, FileText, Image, Package, Eye, Code } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 
 interface OutputPanelProps {
   result: ConversionResult;
   onDownloadFnt: () => void;
   onDownloadAtlas: () => void;
   onDownloadBoth: () => void;
+  onOutputNameChange: (name: string) => void;
 }
 
 type Tab = 'atlas' | 'fnt';
 
-export function OutputPanel({ result, onDownloadFnt, onDownloadAtlas, onDownloadBoth }: OutputPanelProps) {
+export function OutputPanel({ result, onDownloadFnt, onDownloadAtlas, onDownloadBoth, onOutputNameChange }: OutputPanelProps) {
   const [activeTab, setActiveTab] = useState<Tab>('atlas');
   const [checkerBg, setCheckerBg] = useState(true);
+  const [outputName, setOutputName] = useState(result.fontName);
+
+  useEffect(() => {
+    setOutputName(result.fontName);
+  }, [result.fontName]);
+
+  const commitOutputName = () => {
+    if (!outputName.trim()) {
+      setOutputName(result.fontName);
+      return;
+    }
+    onOutputNameChange(outputName);
+  };
 
   return (
     <div className="space-y-4">
+      {/* Output Name */}
+      <div className="space-y-2 rounded-lg border border-border bg-secondary p-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-xs text-muted-foreground uppercase tracking-wider">Output Name</p>
+            <p className="text-[11px] text-muted-foreground mt-0.5">Used for the .fnt face and PNG filename</p>
+          </div>
+          <Input
+            value={outputName}
+            onChange={(e) => setOutputName(e.target.value)}
+            onBlur={commitOutputName}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.currentTarget.blur();
+            }}
+            className="max-w-[220px] bg-background border-border mono text-xs"
+            aria-label="Custom output name"
+          />
+        </div>
+      </div>
+
       {/* Stats Row */}
       <div className="grid grid-cols-3 gap-3">
         <div className="bg-secondary rounded-lg p-3 border border-border">
