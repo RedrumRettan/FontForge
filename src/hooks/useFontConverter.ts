@@ -353,9 +353,14 @@ export function useFontConverter() {
       const { fontSize, padding, spacing, atlasWidth, atlasHeight, color } = config;
       const useNativeColors = config.useNativeColors && !!loadedFont?.isColorFont;
       const chars = CHARSETS[config.charset] ?? config.charset;
-      const nativeEngine = useNativeColors && loadedFont?.data
-        ? await createNativeFontEngine(loadedFont.data)
-        : null;
+      let nativeEngine: Awaited<ReturnType<typeof createNativeFontEngine>> | null = null;
+      if (useNativeColors && loadedFont?.data) {
+        try {
+          nativeEngine = await createNativeFontEngine(loadedFont.data);
+        } catch {
+          console.warn('[FontForge] native engine unavailable — using canvas fallback');
+        }
+      }
       const nativeGlyphIds = nativeEngine
         ? nativeEngine.resolveGlyphIndices(Array.from(chars, char => char.codePointAt(0) ?? 0))
         : [];

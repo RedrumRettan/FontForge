@@ -1,3 +1,11 @@
+/**
+ * Native font engine stub.
+ *
+ * The WASM build artefact (`./wasm/pkg/font_native.js`) is not bundled in this
+ * project, so every call here throws immediately. The converter hook catches
+ * the rejection and falls back to the fully-functional canvas-based pipeline.
+ */
+
 import { FontTableInfo } from '@/types/font';
 
 export interface NativeShapedGlyph {
@@ -19,73 +27,14 @@ export interface NativeGlyphBitmap {
   rgba: Uint8Array;
 }
 
-interface NativeModule {
-  default?: (input?: RequestInfo | URL | Response | BufferSource | WebAssembly.Module) => Promise<unknown>;
-  initSync?: (module: BufferSource | WebAssembly.Module) => unknown;
-  NativeFontEngine: new (data: Uint8Array) => NativeFontEngine;
-}
-
-interface NativeFontEngine {
-  table_inventory(): unknown;
-  resolve_glyph_indices(codepoints: number[]): number[];
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export async function createNativeFontEngine(_fontData: Uint8Array): Promise<{
+  getTableInfo(): FontTableInfo;
+  resolveGlyphIndices(codepoints: number[]): number[];
   metrics(pxSize: number): { ascent: number; descent: number; line_gap: number };
-  glyph_metrics(glyphId: number, pxSize: number): { advance_width: number; left_side_bearing: number };
+  glyphMetrics(glyphId: number, pxSize: number): { advance_width: number; left_side_bearing: number };
   shape(text: string, pxSize: number): NativeShapedGlyph[];
-  rasterize_glyph(glyphId: number, pxSize: number, colorRgba: number): NativeGlyphBitmap;
-}
-
-let nativeModulePromise: Promise<NativeModule> | null = null;
-
-async function loadModule(): Promise<NativeModule> {
-  if (!nativeModulePromise) {
-    nativeModulePromise = (async () => {
-      const mod = await import('./wasm/pkg/font_native.js') as NativeModule;
-      if (typeof mod.default === 'function') {
-        await mod.default();
-      }
-      return mod;
-    })();
-  }
-  return nativeModulePromise;
-}
-
-export async function createNativeFontEngine(fontData: Uint8Array) {
-  const mod = await loadModule();
-  if (!mod.NativeFontEngine) {
-    throw new Error('WASM module loaded but NativeFontEngine export is missing.');
-  }
-  const engine = new mod.NativeFontEngine(fontData);
-
-  return {
-    getTableInfo(): FontTableInfo {
-      const inventory = engine.table_inventory() as Record<string, unknown>;
-      return {
-        hasSVG: !!inventory.has_svg,
-        hasGPOS: !!inventory.has_gpos,
-        hasGSUB: !!inventory.has_gsub,
-        hasOS2: !!inventory.has_os2,
-        hasCFF: !!inventory.has_cff,
-        hasCFF2: !!inventory.has_cff2,
-        hasCOLR: !!inventory.has_colr || !!inventory.has_cpal,
-        hasCBDT: !!inventory.has_cbdt || !!inventory.has_cblc,
-        hasSBIX: !!inventory.has_sbix,
-        rawTables: (inventory.raw_tables as string[]) ?? [],
-      };
-    },
-    resolveGlyphIndices(codepoints: number[]): number[] {
-      return engine.resolve_glyph_indices(codepoints);
-    },
-    metrics(pxSize: number) {
-      return engine.metrics(pxSize);
-    },
-    glyphMetrics(glyphId: number, pxSize: number) {
-      return engine.glyph_metrics(glyphId, pxSize);
-    },
-    shape(text: string, pxSize: number): NativeShapedGlyph[] {
-      return engine.shape(text, pxSize);
-    },
-    rasterizeGlyph(glyphId: number, pxSize: number, colorRgba: number): NativeGlyphBitmap {
-      return engine.rasterize_glyph(glyphId, pxSize, colorRgba);
-    },
-  };
+  rasterizeGlyph(glyphId: number, pxSize: number, colorRgba: number): NativeGlyphBitmap;
+}> {
+  throw new Error('Native WASM engine not available — canvas fallback will be used.');
 }
