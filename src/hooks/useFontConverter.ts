@@ -83,46 +83,77 @@ async function parseFontTables(file: File): Promise<FontTableInfo> {
 
 // ─── Single-glyph renderer ────────────────────────────────────────────────────
 
-interface GlyphRender {
-  imageData: ImageData;  // tight crop of just the ink pixels
-  ascent: number;        // pixels above baseline in the crop
-  xoffset: number;       // pixels the crop starts to the right of the draw point (can be negative)
+interface FontLineMetrics {
+  ascent: number;
+  descent: number;
+  line_gap: number;
 }
 
-function cropGlyphFromCanvas(
-  ctx: CanvasRenderingContext2D,
-  cw: number,
-  ch: number,
-  drawX: number,
-  drawY: number,
-): GlyphRender | null {
-  const { data } = ctx.getImageData(0, 0, cw, ch);
-  let minX = cw, maxX = -1, minY = ch, maxY = -1;
+interface GlyphRender {
+  imageData: ImageData;  // engine-measured glyph bitmap, preserving all RGBA channels
+  left: number;          // bitmap left edge relative to the pen position
+  top: number;           // bitmap top edge above the alphabetic baseline
+}
 
-  for (let y = 0; y < ch; y++) {
-    for (let x = 0; x < cw; x++) {
-      const i = (y * cw + x) * 4;
-      const a = data[i + 3];
-      const hasInk = a > 6 || (a > 0 && (data[i] > 6 || data[i + 1] > 6 || data[i + 2] > 6));
-      if (hasInk) {
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-      }
+interface NormalizedGlyph {
+  imageData: ImageData;
+  xoffset: number;
+  yoffset: number;
+}
+
+function copyPixel(src: Uint8ClampedArray, dst: Uint8ClampedArray, srcIndex: number, dstIndex: number) {
+  dst[dstIndex] = src[srcIndex];
+  dst[dstIndex + 1] = src[srcIndex + 1];
+  dst[dstIndex + 2] = src[srcIndex + 2];
+  dst[dstIndex + 3] = src[srcIndex + 3];
+}
+
+function normalizeGlyphBitmap(render: GlyphRender, padding: number, extrude: number, base: number): NormalizedGlyph {
+  const transparentPadding = Math.max(0, Math.floor(padding));
+  const edge = Math.max(0, Math.min(2, Math.floor(extrude)));
+  const border = transparentPadding + edge;
+  const src = render.imageData;
+  const dstWidth = src.width + border * 2;
+  const dstHeight = src.height + border * 2;
+  const dst = new Uint8ClampedArray(dstWidth * dstHeight * 4);
+
+  for (let y = 0; y < src.height; y++) {
+    for (let x = 0; x < src.width; x++) {
+      copyPixel(src.data, dst, (y * src.width + x) * 4, ((y + border) * dstWidth + x + border) * 4);
     }
   }
 
-  if (maxX < 0) return null;
-
-  const cropW = maxX - minX + 1;
-  const cropH = maxY - minY + 1;
-  const cropped = ctx.getImageData(minX, minY, cropW, cropH);
+  for (let amount = 1; amount <= edge; amount++) {
+    const topY = border - amount;
+    const bottomY = border + src.height - 1 + amount;
+    for (let x = 0; x < src.width; x++) {
+      copyPixel(dst, dst, (border * dstWidth + x + border) * 4, (topY * dstWidth + x + border) * 4);
+      copyPixel(dst, dst, ((border + src.height - 1) * dstWidth + x + border) * 4, (bottomY * dstWidth + x + border) * 4);
+    }
+    for (let y = 0; y < src.height; y++) {
+      const dy = y + border;
+      copyPixel(dst, dst, (dy * dstWidth + border) * 4, (dy * dstWidth + border - amount) * 4);
+      copyPixel(dst, dst, (dy * dstWidth + border + src.width - 1) * 4, (dy * dstWidth + border + src.width - 1 + amount) * 4);
+    }
+    copyPixel(dst, dst, (border * dstWidth + border) * 4, (topY * dstWidth + border - amount) * 4);
+    copyPixel(dst, dst, (border * dstWidth + border + src.width - 1) * 4, (topY * dstWidth + border + src.width - 1 + amount) * 4);
+    copyPixel(dst, dst, ((border + src.height - 1) * dstWidth + border) * 4, (bottomY * dstWidth + border - amount) * 4);
+    copyPixel(dst, dst, ((border + src.height - 1) * dstWidth + border + src.width - 1) * 4, (bottomY * dstWidth + border + src.width - 1 + amount) * 4);
+  }
 
   return {
-    imageData: cropped,
-    ascent: drawY - minY,
-    xoffset: minX - drawX,
+    imageData: new ImageData(dst, dstWidth, dstHeight),
+    xoffset: Math.round(render.left) - border,
+    yoffset: base - Math.round(render.top) - border,
+  };
+}
+
+function browserFontLineMetrics(ctx: CanvasRenderingContext2D, fontSize: number): FontLineMetrics {
+  const metrics = ctx.measureText('Mg');
+  return {
+    ascent: Math.ceil(metrics.fontBoundingBoxAscent || metrics.actualBoundingBoxAscent || fontSize * 0.8),
+    descent: Math.ceil(metrics.fontBoundingBoxDescent || metrics.actualBoundingBoxDescent || fontSize * 0.2),
+    line_gap: 0,
   };
 }
 
@@ -168,7 +199,7 @@ async function extractSvgDocument(fontData: Uint8Array, glyphId: number): Promis
   return null;
 }
 
-function rasterizeSvgDocument(svg: string, fontSize: number): Promise<GlyphRender | null> {
+function rasterizeSvgDocument(svg: string, fontSize: number, base: number): Promise<GlyphRender | null> {
   return new Promise(resolve => {
     const parser = new DOMParser();
     const doc = parser.parseFromString(svg, 'image/svg+xml');
@@ -196,7 +227,7 @@ function rasterizeSvgDocument(svg: string, fontSize: number): Promise<GlyphRende
       ctx.clearRect(0, 0, fontSize, fontSize);
       ctx.drawImage(image, 0, 0, fontSize, fontSize);
       URL.revokeObjectURL(url);
-      resolve(cropGlyphFromCanvas(ctx, fontSize, fontSize, 0, fontSize));
+      resolve({ imageData: ctx.getImageData(0, 0, fontSize, fontSize), left: 0, top: base });
     };
     image.onerror = () => {
       URL.revokeObjectURL(url);
@@ -216,8 +247,8 @@ function glyphBitmapToRender(bitmap: NativeGlyphBitmap): GlyphRender | null {
 
   return {
     imageData: new ImageData(pixels, bitmap.width, bitmap.height),
-    ascent: bitmap.top,
-    xoffset: bitmap.left,
+    left: bitmap.left,
+    top: bitmap.top,
   };
 }
 
@@ -237,29 +268,35 @@ function renderGlyph(
   fontFamily: string,
   fontSize: number,
   color: string,
-): Promise<GlyphRender | null> {
-  // Oversized canvas so glyphs with extreme descenders/ascenders fit
-  const margin = Math.ceil(fontSize * 1.5);
-  const cw = Math.ceil(fontSize * 3);
-  const ch = Math.ceil(fontSize * 3);
+  metrics?: TextMetrics,
+): GlyphRender | null {
+  const measureCanvas = document.createElement('canvas');
+  const measureCtx = measureCanvas.getContext('2d')!;
+  measureCtx.font = `${fontSize}px "${fontFamily}"`;
+  measureCtx.textBaseline = 'alphabetic';
+  const textMetrics = metrics ?? measureCtx.measureText(char);
+  const leftBearing = Math.ceil(textMetrics.actualBoundingBoxLeft || 0);
+  const rightBearing = Math.ceil(textMetrics.actualBoundingBoxRight || textMetrics.width || 0);
+  const top = Math.ceil(textMetrics.actualBoundingBoxAscent || 0);
+  const bottom = Math.ceil(textMetrics.actualBoundingBoxDescent || 0);
+
+  if (leftBearing + rightBearing <= 0 || top + bottom <= 0) return null;
 
   const canvas = document.createElement('canvas');
-  canvas.width = cw;
-  canvas.height = ch;
+  canvas.width = leftBearing + rightBearing;
+  canvas.height = top + bottom;
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
-
-  // Baseline sits at 60% down so there's room for ascenders and descenders
-  const drawX = margin;
-  const drawY = Math.round(ch * 0.6);
-
-  ctx.clearRect(0, 0, cw, ch);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.font = `${fontSize}px "${fontFamily}"`;
   ctx.textBaseline = 'alphabetic';
-
   ctx.fillStyle = color;
-  ctx.fillText(char, drawX, drawY);
+  ctx.fillText(char, leftBearing, top);
 
-  return cropGlyphFromCanvas(ctx, cw, ch, drawX, drawY);
+  return {
+    imageData: ctx.getImageData(0, 0, canvas.width, canvas.height),
+    left: -leftBearing,
+    top,
+  };
 }
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
@@ -361,11 +398,11 @@ export function useFontConverter() {
     await new Promise(r => setTimeout(r, 20));
 
     try {
-      const { fontSize, padding, spacing, atlasWidth, atlasHeight, color } = config;
+      const { fontSize, padding, extrude, spacing, atlasWidth, atlasHeight, color } = config;
       const useNativeColors = config.useNativeColors && !!loadedFont?.isColorFont;
       const chars = CHARSETS[config.charset] ?? config.charset;
       const charList = Array.from(chars);
-      const nativeEngine = useNativeColors && loadedFont?.data
+      const nativeEngine = loadedFont?.data
         ? await createOptionalNativeFontEngine(loadedFont.data)
         : null;
       const nativeGlyphIds = nativeEngine
@@ -378,26 +415,33 @@ export function useFontConverter() {
         throw new Error(`Font "${fontFamily}" is not active for rendering`);
       }
 
-      // ── 1. Render every glyph and collect global metrics ──────────────────
+      // ── 1. Render every glyph and normalize texture rectangles ──────────────
 
-      // Use a shared measure canvas for xadvance (faster than metrics per glyph)
       const measureCanvas = document.createElement('canvas');
       const mCtx = measureCanvas.getContext('2d')!;
       mCtx.font = `${fontSize}px "${fontFamily}"`;
+      mCtx.textBaseline = 'alphabetic';
+
+      const fontMetrics = nativeEngine
+        ? nativeEngine.metrics(fontSize)
+        : browserFontLineMetrics(mCtx, fontSize);
+      const base = Math.ceil(fontMetrics.ascent);
+      const lineHeight = Math.ceil(fontMetrics.ascent + Math.abs(fontMetrics.descent) + fontMetrics.line_gap);
+      const totalPadding = padding + Math.max(0, Math.min(2, Math.floor(extrude)));
 
       interface RenderEntry {
         char: string;
         id: number;
-        render: GlyphRender | null;
+        normalized: NormalizedGlyph | null;
         xadvance: number;
       }
 
       const entries: RenderEntry[] = [];
-      let globalAscent = 0;   // max pixels above baseline across all glyphs
-      let globalDescent = 0;  // max pixels below baseline
 
       for (const [index, char] of charList.entries()) {
+        const id = char.codePointAt(0) ?? 0;
         const glyphId = nativeGlyphIds[index] ?? 0;
+        const textMetrics = mCtx.measureText(char);
         const svgDocument = nativeEngine && useNativeColors && loadedFont?.tableInfo.hasSVG
           ? await extractSvgDocument(loadedFont.data, glyphId)
           : null;
@@ -405,30 +449,25 @@ export function useFontConverter() {
           ? nativeEngine.rasterizeGlyph(glyphId, fontSize, nativeColor)
           : null;
         const render = svgDocument
-          ? await rasterizeSvgDocument(svgDocument, fontSize)
+          ? await rasterizeSvgDocument(svgDocument, fontSize, base)
           : bitmap
             ? glyphBitmapToRender(bitmap)
-            : await renderGlyph(char, fontFamily, fontSize, color);
+            : renderGlyph(char, fontFamily, fontSize, color, textMetrics);
         const xadvance = bitmap
           ? Math.round(bitmap.advance_width)
           : nativeEngine
             ? Math.round(nativeEngine.glyphMetrics(glyphId, fontSize).advance_width)
-            : Math.round(mCtx.measureText(char).width);
+            : Math.round(textMetrics.width);
 
-        if (render) {
-          globalAscent  = Math.max(globalAscent,  render.ascent);
-          // descent = crop height - ascent  (pixels below baseline in the crop)
-          globalDescent = Math.max(globalDescent, render.imageData.height - render.ascent);
-        }
-
-        entries.push({ char, id: char.codePointAt(0) ?? 0, render, xadvance });
+        entries.push({
+          char,
+          id,
+          normalized: render ? normalizeGlyphBitmap(render, padding, extrude, base) : null,
+          xadvance,
+        });
       }
 
-      // Add 1px slack so descenders don't clip
-      const lineHeight = globalAscent + globalDescent + 1;
-      const base = globalAscent;
-
-      console.log(`[FontForge] lineHeight=${lineHeight} base=${base} (ascent=${globalAscent} descent=${globalDescent})`);
+      console.log(`[FontForge] lineHeight=${lineHeight} base=${base} (ascent=${fontMetrics.ascent} descent=${fontMetrics.descent} gap=${fontMetrics.line_gap})`);
 
       // ── 2. Pack glyphs into the atlas canvas ──────────────────────────────
 
@@ -439,62 +478,47 @@ export function useFontConverter() {
       actx.clearRect(0, 0, atlasWidth, atlasHeight);
 
       const glyphs: CharGlyph[] = [];
-      let cx = padding;   // cursor x
-      let cy = padding;   // cursor y (top of current row)
+      let cx = totalPadding;
+      let cy = totalPadding;
+      let rowH = lineHeight + totalPadding * 2;
 
-      // Each row is tall enough to hold the tallest glyph + padding on both sides
-      const rowH = lineHeight + padding * 2;
-
-      for (const { char, id, render, xadvance } of entries) {
-        if (!render) {
-          // Invisible char (space, zero-width, etc.) — emit with zero size
+      for (const { char, id, normalized, xadvance } of entries) {
+        if (!normalized) {
           glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
           continue;
         }
 
-        const gw = render.imageData.width;
-        const gh = render.imageData.height;
+        const gw = normalized.imageData.width;
+        const gh = normalized.imageData.height;
 
-        // Cell width = glyph pixels + padding on each side
-        const cellW = gw + padding * 2;
-
-        // Wrap to next row if needed
-        if (cx + cellW > atlasWidth - padding) {
-          cx = padding;
+        if (cx + gw > atlasWidth - totalPadding) {
+          cx = totalPadding;
           cy += rowH + spacing;
+          rowH = lineHeight + totalPadding * 2;
         }
 
-        if (cy + rowH > atlasHeight) {
+        if (cy + gh > atlasHeight) {
           console.warn(`[FontForge] atlas full — '${char}' skipped`);
-          // Still push the glyph with 0 coords so the FNT char count is accurate
           glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
           continue;
         }
 
-        // Where this glyph's pixels land in the atlas
-        const atlasX = cx + padding;
-        // Vertically align glyphs to a shared baseline:
-        // top of cell + padding + (globalAscent - this glyph's ascent)
-        const atlasY = cy + padding + (globalAscent - render.ascent);
-
-        actx.putImageData(render.imageData, atlasX, atlasY);
+        actx.putImageData(normalized.imageData, cx, cy);
 
         glyphs.push({
           id,
           char,
-          x: atlasX,
-          y: atlasY,
-          width:  gw,
+          x: cx,
+          y: cy,
+          width: gw,
           height: gh,
-          // xoffset: shift applied by the renderer when drawing from cursor
-          // If the glyph pixels start to the right of the draw point, xoffset > 0
-          xoffset: render.xoffset,
-          // yoffset: distance from the top of the line to the top of the glyph crop
-          yoffset: globalAscent - render.ascent,
+          xoffset: normalized.xoffset,
+          yoffset: normalized.yoffset,
           xadvance,
         });
 
-        cx += cellW + spacing;
+        cx += gw + spacing;
+        rowH = Math.max(rowH, gh);
       }
 
       // ── 3. Generate the .fnt text ─────────────────────────────────────────
@@ -502,7 +526,7 @@ export function useFontConverter() {
       const lines: string[] = [];
       lines.push(
         `info face="${fontName}" size=${fontSize} bold=0 italic=0 charset="" unicode=1 stretchH=100 smooth=1 aa=1` +
-        ` padding=${padding},${padding},${padding},${padding} spacing=${spacing},${spacing}`
+        ` padding=${totalPadding},${totalPadding},${totalPadding},${totalPadding} spacing=${spacing},${spacing}`
       );
       lines.push(
         `common lineHeight=${lineHeight} base=${base} scaleW=${atlasWidth} scaleH=${atlasHeight} pages=1 packed=0`

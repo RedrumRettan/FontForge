@@ -26,6 +26,7 @@ export interface CharGlyph {
 export interface FontConversionConfig {
   fontSize: number;
   padding: number;
+  extrude: number;
   spacing: number;
   atlasWidth: number;
   atlasHeight: number;
@@ -47,6 +48,7 @@ export interface ConversionResult {
 export const DEFAULT_CONFIG: FontConversionConfig = {
   fontSize: 32,
   padding: 2,
+  extrude: 0,
   spacing: 1,
   atlasWidth: 512,
   atlasHeight: 512,
