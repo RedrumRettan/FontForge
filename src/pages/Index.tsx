@@ -162,7 +162,7 @@ const Index = () => {
                       <span>·</span>
                       <span>{charCount} chars</span>
                       <span>·</span>
-                      <span>{config.atlasWidth}×{config.atlasHeight} atlas</span>
+                      <span>{config.atlasWidth}×{config.atlasHeight} atlas pages</span>
                     </div>
                     <p className="text-xs text-muted-foreground">
                       Configure settings in the panel on the right, then click Convert.
@@ -240,8 +240,8 @@ const Index = () => {
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   {[
                     { step: '01', title: 'Drop your font', body: 'Upload any TTF or OTF font file. The file never leaves your browser.' },
-                    { step: '02', title: 'Configure', body: 'Choose font size, atlas dimensions, padding, character set, and glyph color.' },
-                    { step: '03', title: 'Export', body: 'Download the .fnt metadata and .png texture atlas ready for your game engine.' },
+                    { step: '02', title: 'Configure', body: 'Choose font size, atlas dimensions, padding, border, character set, and glyph color.' },
+                    { step: '03', title: 'Export', body: 'Download the .fnt metadata and one or more .png texture atlases ready for your game engine.' },
                   ].map(({ step, title, body }) => (
                     <div key={step} className="space-y-2">
                       <span className="mono text-3xl font-bold text-border">{step}</span>

@@ -21,12 +21,39 @@ export interface CharGlyph {
   xoffset: number;
   yoffset: number;
   xadvance: number;
+  page: number;
+}
+
+export interface AtlasPage {
+  id: number;
+  fileName: string;
+  dataUrl: string;
+}
+
+export interface PackingPageStats {
+  page: number;
+  width: number;
+  height: number;
+  rects: number;
+  usedArea: number;
+  usableArea: number;
+  occupancy: number;
+}
+
+export interface PackingStats {
+  pages: number;
+  rects: number;
+  usedArea: number;
+  usableArea: number;
+  occupancy: number;
+  pageStats: PackingPageStats[];
 }
 
 export interface FontConversionConfig {
   fontSize: number;
   padding: number;
   spacing: number;
+  border: number;
   atlasWidth: number;
   atlasHeight: number;
   charset: string;
@@ -38,7 +65,9 @@ export interface FontConversionConfig {
 export interface ConversionResult {
   fntContent: string;
   atlasDataUrl: string;
+  atlasPages: AtlasPage[];
   glyphs: CharGlyph[];
+  packingStats: PackingStats;
   fontName: string;
   lineHeight: number;
   base: number;
@@ -48,6 +77,7 @@ export const DEFAULT_CONFIG: FontConversionConfig = {
   fontSize: 32,
   padding: 2,
   spacing: 1,
+  border: 2,
   atlasWidth: 512,
   atlasHeight: 512,
   charset: 'ASCII_PRINTABLE',
