@@ -836,8 +836,8 @@ export function useFontConverter() {
       const fontMetrics = nativeEngine
         ? nativeEngine.metrics(fontSize)
         : browserFontLineMetrics(mCtx, fontSize);
-      const base = Math.ceil(fontMetrics.ascent);
-      const lineHeight = Math.ceil(fontMetrics.ascent + Math.abs(fontMetrics.descent) + fontMetrics.line_gap);
+      const base = referenceLayout?.base ?? Math.ceil(fontMetrics.ascent);
+      const lineHeight = referenceLayout?.lineHeight ?? Math.ceil(fontMetrics.ascent + Math.abs(fontMetrics.descent) + fontMetrics.line_gap);
       const totalPadding = padding + Math.max(0, Math.min(2, Math.floor(extrude)));
 
       interface RenderEntry {
@@ -864,11 +864,14 @@ export function useFontConverter() {
           : bitmap
             ? glyphBitmapToRender(bitmap)
             : renderGlyph(char, fontFamily, fontSize, color, textMetrics);
-        const xadvance = bitmap
-          ? Math.round(bitmap.advance_width)
-          : nativeEngine
-            ? Math.round(nativeEngine.glyphMetrics(glyphId, fontSize).advance_width)
-            : Math.round(textMetrics.width);
+        const referenceGlyph = referenceLayout?.glyphMap.get(id);
+        const xadvance = referenceGlyph
+          ? referenceGlyph.xadvance
+          : bitmap
+            ? Math.round(bitmap.advance_width)
+            : nativeEngine
+              ? Math.round(nativeEngine.glyphMetrics(glyphId, fontSize).advance_width)
+              : Math.round(textMetrics.width);
 
         entries.push({
           char,
@@ -965,12 +968,26 @@ export function useFontConverter() {
 
       for (const g of glyphs) {
         lines.push(
-          `char id=${g.id} ` +
-          `x=${g.x} y=${g.y} ` +
-          `width=${g.width} height=${g.height} ` +
-          `xoffset=${g.xoffset} yoffset=${g.yoffset} ` +
-          `xadvance=${g.xadvance} page=0 chnl=15`
+          `info face="${fontName}" size=${fontSize} bold=0 italic=0 charset="" unicode=1 stretchH=100 smooth=1 aa=1` +
+          ` padding=${totalPadding},${totalPadding},${totalPadding},${totalPadding} spacing=${spacing},${spacing}`
         );
+        lines.push(
+          `common lineHeight=${lineHeight} base=${base} scaleW=${outputAtlasWidth} scaleH=${outputAtlasHeight} pages=1 packed=0`
+        );
+        lines.push(`page id=0 file="${fontName}_0.png"`);
+        lines.push(`chars count=${glyphs.length}`);
+
+        for (const g of glyphs) {
+          lines.push(
+            `char id=${g.id} ` +
+            `x=${g.x} y=${g.y} ` +
+            `width=${g.width} height=${g.height} ` +
+            `xoffset=${g.xoffset} yoffset=${g.yoffset} ` +
+            `xadvance=${g.xadvance} page=0 chnl=15`
+          );
+        }
+
+        fntContent = lines.join('\n');
       }
 
       const fntContent = lines.join('\n');
