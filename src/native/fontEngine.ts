@@ -15,6 +15,7 @@ export interface NativeGlyphBitmap {
   left: number;
   top: number;
   advance_width: number;
+  renderer: 'colr_cpal' | 'svg' | 'embedded_bitmap' | 'outline';
   rgba: Uint8Array;
 }
 
