@@ -22,6 +22,11 @@ interface ReferenceFntLayout {
   scaleH: number;
 }
 
+interface ReferenceGlyphPlacement {
+  insetX: number;
+  insetY: number;
+}
+
 interface FontTableRecord {
   offset: number;
 }
@@ -590,8 +595,8 @@ function drawNormalizedGlyphToRect(
   ctx: CanvasRenderingContext2D,
   normalized: NormalizedGlyph,
   target: CharGlyph,
-) {
-  if (target.width <= 0 || target.height <= 0 || normalized.textureWidth <= 0 || normalized.textureHeight <= 0) return;
+): ReferenceGlyphPlacement | null {
+  if (target.width <= 0 || target.height <= 0 || normalized.textureWidth <= 0 || normalized.textureHeight <= 0) return null;
 
   const source = document.createElement('canvas');
   source.width = normalized.textureWidth;
@@ -611,7 +616,15 @@ function drawNormalizedGlyphToRect(
   }
 
   sourceCtx.putImageData(sourceImage, 0, 0);
-  ctx.drawImage(source, target.x, target.y, target.width, target.height);
+
+  const scale = Math.min(target.width / normalized.textureWidth, target.height / normalized.textureHeight);
+  const drawWidth = Math.max(1, Math.round(normalized.textureWidth * scale));
+  const drawHeight = Math.max(1, Math.round(normalized.textureHeight * scale));
+  const insetX = Math.round((target.width - drawWidth) / 2);
+  const insetY = Math.round((target.height - drawHeight) / 2);
+
+  ctx.drawImage(source, target.x + insetX, target.y + insetY, drawWidth, drawHeight);
+  return { insetX, insetY };
 }
 
 function colorToRgbaU32(color: string): number {
@@ -880,11 +893,20 @@ export function useFontConverter() {
 
       const glyphs: CharGlyph[] = [];
       if (referenceLayout) {
-        for (const { id, normalized } of entries) {
+        for (const { id, normalized, xadvance } of entries) {
           const referenceGlyph = referenceLayout.glyphMap.get(id);
           if (!referenceGlyph) continue;
-          if (normalized) drawNormalizedGlyphToRect(actx, normalized, referenceGlyph);
-          glyphs.push({ ...referenceGlyph });
+
+          const placement = normalized
+            ? drawNormalizedGlyphToRect(actx, normalized, referenceGlyph)
+            : null;
+
+          glyphs.push({
+            ...referenceGlyph,
+            xoffset: normalized ? normalized.xoffset - (placement?.insetX ?? 0) : referenceGlyph.xoffset,
+            yoffset: normalized ? normalized.yoffset - (placement?.insetY ?? 0) : referenceGlyph.yoffset,
+            xadvance,
+          });
         }
       } else {
         let cx = totalPadding;
@@ -934,10 +956,17 @@ export function useFontConverter() {
       // ── 3. Generate the .fnt text ─────────────────────────────────────────
 
       const lines: string[] = [];
-      let fntContent: string;
-      if (referenceLayout) {
-        fntContent = renameFntOutput(referenceLayout.content, fontName);
-      } else {
+      lines.push(
+        `info face="${fontName}" size=${fontSize} bold=0 italic=0 charset="" unicode=1 stretchH=100 smooth=1 aa=1` +
+        ` padding=${totalPadding},${totalPadding},${totalPadding},${totalPadding} spacing=${spacing},${spacing}`
+      );
+      lines.push(
+        `common lineHeight=${lineHeight} base=${base} scaleW=${outputAtlasWidth} scaleH=${outputAtlasHeight} pages=1 packed=0`
+      );
+      lines.push(`page id=0 file="${fontName}_0.png"`);
+      lines.push(`chars count=${glyphs.length}`);
+
+      for (const g of glyphs) {
         lines.push(
           `info face="${fontName}" size=${fontSize} bold=0 italic=0 charset="" unicode=1 stretchH=100 smooth=1 aa=1` +
           ` padding=${totalPadding},${totalPadding},${totalPadding},${totalPadding} spacing=${spacing},${spacing}`
@@ -960,6 +989,8 @@ export function useFontConverter() {
 
         fntContent = lines.join('\n');
       }
+
+      const fntContent = lines.join('\n');
 
       const atlasDataUrl = atlas.toDataURL('image/png');
 
