@@ -655,27 +655,61 @@ function renderGlyph(
   measureCtx.font = `${fontSize}px "${fontFamily}"`;
   measureCtx.textBaseline = 'alphabetic';
   const textMetrics = metrics ?? measureCtx.measureText(char);
-  const leftBearing = Math.ceil(textMetrics.actualBoundingBoxLeft || 0);
-  const rightBearing = Math.ceil(textMetrics.actualBoundingBoxRight || textMetrics.width || 0);
+  const horizontalPadding = 2;
+  const verticalPadding = 2;
+  const leftEdge = Math.floor(-textMetrics.actualBoundingBoxLeft);
+  const rightEdge = Math.ceil(
+    Math.max(
+      textMetrics.actualBoundingBoxRight,
+      textMetrics.actualBoundingBoxLeft === 0 && textMetrics.actualBoundingBoxRight === 0
+        ? textMetrics.width
+        : 0,
+    ),
+  );
   const top = Math.ceil(textMetrics.actualBoundingBoxAscent || 0);
   const bottom = Math.ceil(textMetrics.actualBoundingBoxDescent || 0);
+  const canvasWidth = Math.max(1, rightEdge - leftEdge + horizontalPadding * 2);
+  const canvasHeight = Math.max(1, top + bottom + verticalPadding * 2);
 
-  if (leftBearing + rightBearing <= 0 || top + bottom <= 0) return null;
+  if (canvasWidth <= horizontalPadding * 2 || canvasHeight <= verticalPadding * 2) return null;
 
   const canvas = document.createElement('canvas');
-  canvas.width = leftBearing + rightBearing;
-  canvas.height = top + bottom;
+  canvas.width = canvasWidth;
+  canvas.height = canvasHeight;
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.font = `${fontSize}px "${fontFamily}"`;
   ctx.textBaseline = 'alphabetic';
   ctx.fillStyle = color;
-  ctx.fillText(char, leftBearing, top);
+  ctx.fillText(char, horizontalPadding - leftEdge, verticalPadding + top);
+
+  const drawn = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  let minX = canvas.width;
+  let minY = canvas.height;
+  let maxX = -1;
+  let maxY = -1;
+
+  for (let y = 0; y < canvas.height; y++) {
+    for (let x = 0; x < canvas.width; x++) {
+      if (drawn.data[(y * canvas.width + x) * 4 + 3] === 0) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+
+  if (maxX < minX || maxY < minY) return null;
+
+  const croppedWidth = maxX - minX + 1;
+  const croppedHeight = maxY - minY + 1;
+  const cropped = ctx.getImageData(minX, minY, croppedWidth, croppedHeight);
+  const baselineY = verticalPadding + top;
 
   return {
-    imageData: ctx.getImageData(0, 0, canvas.width, canvas.height),
-    left: -leftBearing,
-    top,
+    imageData: cropped,
+    left: leftEdge + minX - horizontalPadding,
+    top: baselineY - minY,
   };
 }
 
