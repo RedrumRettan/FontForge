@@ -25,6 +25,8 @@ interface ReferenceFntLayout {
 interface ReferenceGlyphPlacement {
   insetX: number;
   insetY: number;
+  width: number;
+  height: number;
 }
 
 interface FontTableRecord {
@@ -617,14 +619,17 @@ function drawNormalizedGlyphToRect(
 
   sourceCtx.putImageData(sourceImage, 0, 0);
 
-  const scale = Math.min(target.width / normalized.textureWidth, target.height / normalized.textureHeight);
-  const drawWidth = Math.max(1, Math.round(normalized.textureWidth * scale));
-  const drawHeight = Math.max(1, Math.round(normalized.textureHeight * scale));
+  // Reference .fnt rectangles can have a very different aspect ratio from the
+  // replacement glyph. Use one locked scale based on the smaller axis fit so
+  // both axes are resized together instead of independently stretching letters.
+  const lockedScale = Math.min(target.width / normalized.textureWidth, target.height / normalized.textureHeight);
+  const drawWidth = Math.max(1, Math.round(normalized.textureWidth * lockedScale));
+  const drawHeight = Math.max(1, Math.round(normalized.textureHeight * lockedScale));
   const insetX = Math.round((target.width - drawWidth) / 2);
   const insetY = Math.round((target.height - drawHeight) / 2);
 
   ctx.drawImage(source, target.x + insetX, target.y + insetY, drawWidth, drawHeight);
-  return { insetX, insetY };
+  return { insetX, insetY, width: drawWidth, height: drawHeight };
 }
 
 function colorToRgbaU32(color: string): number {
@@ -650,27 +655,55 @@ function renderGlyph(
   measureCtx.font = `${fontSize}px "${fontFamily}"`;
   measureCtx.textBaseline = 'alphabetic';
   const textMetrics = metrics ?? measureCtx.measureText(char);
-  const leftBearing = Math.ceil(textMetrics.actualBoundingBoxLeft || 0);
-  const rightBearing = Math.ceil(textMetrics.actualBoundingBoxRight || textMetrics.width || 0);
-  const top = Math.ceil(textMetrics.actualBoundingBoxAscent || 0);
-  const bottom = Math.ceil(textMetrics.actualBoundingBoxDescent || 0);
-
-  if (leftBearing + rightBearing <= 0 || top + bottom <= 0) return null;
+  const lineMetrics = browserFontLineMetrics(measureCtx, fontSize);
+  const horizontalOverhang = Math.max(0, Math.ceil(textMetrics.actualBoundingBoxLeft || 0));
+  const horizontalExtent = Math.max(
+    textMetrics.width,
+    Math.abs(textMetrics.actualBoundingBoxLeft || 0) + Math.abs(textMetrics.actualBoundingBoxRight || 0),
+    fontSize,
+  );
+  const renderPadding = Math.ceil(fontSize);
+  const penX = renderPadding + horizontalOverhang;
+  const baselineY = renderPadding + lineMetrics.ascent;
+  const canvasWidth = Math.max(1, Math.ceil(horizontalExtent + horizontalOverhang + renderPadding * 2));
+  const canvasHeight = Math.max(1, Math.ceil(lineMetrics.ascent + lineMetrics.descent + renderPadding * 2));
 
   const canvas = document.createElement('canvas');
-  canvas.width = leftBearing + rightBearing;
-  canvas.height = top + bottom;
+  canvas.width = canvasWidth;
+  canvas.height = canvasHeight;
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.font = `${fontSize}px "${fontFamily}"`;
   ctx.textBaseline = 'alphabetic';
   ctx.fillStyle = color;
-  ctx.fillText(char, leftBearing, top);
+  ctx.fillText(char, penX, baselineY);
+
+  const drawn = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  let minX = canvas.width;
+  let minY = canvas.height;
+  let maxX = -1;
+  let maxY = -1;
+
+  for (let y = 0; y < canvas.height; y++) {
+    for (let x = 0; x < canvas.width; x++) {
+      if (drawn.data[(y * canvas.width + x) * 4 + 3] === 0) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+
+  if (maxX < minX || maxY < minY) return null;
+
+  const croppedWidth = maxX - minX + 1;
+  const croppedHeight = maxY - minY + 1;
+  const cropped = ctx.getImageData(minX, minY, croppedWidth, croppedHeight);
 
   return {
-    imageData: ctx.getImageData(0, 0, canvas.width, canvas.height),
-    left: -leftBearing,
-    top,
+    imageData: cropped,
+    left: minX - penX,
+    top: baselineY - minY,
   };
 }
 
@@ -903,8 +936,12 @@ export function useFontConverter() {
 
           glyphs.push({
             ...referenceGlyph,
-            xoffset: normalized ? normalized.xoffset - (placement?.insetX ?? 0) : referenceGlyph.xoffset,
-            yoffset: normalized ? normalized.yoffset - (placement?.insetY ?? 0) : referenceGlyph.yoffset,
+            x: placement ? referenceGlyph.x + placement.insetX : referenceGlyph.x,
+            y: placement ? referenceGlyph.y + placement.insetY : referenceGlyph.y,
+            width: placement?.width ?? referenceGlyph.width,
+            height: placement?.height ?? referenceGlyph.height,
+            xoffset: normalized ? normalized.xoffset : referenceGlyph.xoffset,
+            yoffset: normalized ? normalized.yoffset : referenceGlyph.yoffset,
             xadvance,
           });
         }
@@ -968,26 +1005,12 @@ export function useFontConverter() {
 
       for (const g of glyphs) {
         lines.push(
-          `info face="${fontName}" size=${fontSize} bold=0 italic=0 charset="" unicode=1 stretchH=100 smooth=1 aa=1` +
-          ` padding=${totalPadding},${totalPadding},${totalPadding},${totalPadding} spacing=${spacing},${spacing}`
+          `char id=${g.id} ` +
+          `x=${g.x} y=${g.y} ` +
+          `width=${g.width} height=${g.height} ` +
+          `xoffset=${g.xoffset} yoffset=${g.yoffset} ` +
+          `xadvance=${g.xadvance} page=0 chnl=15`
         );
-        lines.push(
-          `common lineHeight=${lineHeight} base=${base} scaleW=${outputAtlasWidth} scaleH=${outputAtlasHeight} pages=1 packed=0`
-        );
-        lines.push(`page id=0 file="${fontName}_0.png"`);
-        lines.push(`chars count=${glyphs.length}`);
-
-        for (const g of glyphs) {
-          lines.push(
-            `char id=${g.id} ` +
-            `x=${g.x} y=${g.y} ` +
-            `width=${g.width} height=${g.height} ` +
-            `xoffset=${g.xoffset} yoffset=${g.yoffset} ` +
-            `xadvance=${g.xadvance} page=0 chnl=15`
-          );
-        }
-
-        fntContent = lines.join('\n');
       }
 
       const fntContent = lines.join('\n');
