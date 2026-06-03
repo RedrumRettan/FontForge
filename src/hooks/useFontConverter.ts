@@ -655,23 +655,18 @@ function renderGlyph(
   measureCtx.font = `${fontSize}px "${fontFamily}"`;
   measureCtx.textBaseline = 'alphabetic';
   const textMetrics = metrics ?? measureCtx.measureText(char);
-  const horizontalPadding = 2;
-  const verticalPadding = 2;
-  const leftEdge = Math.floor(-textMetrics.actualBoundingBoxLeft);
-  const rightEdge = Math.ceil(
-    Math.max(
-      textMetrics.actualBoundingBoxRight,
-      textMetrics.actualBoundingBoxLeft === 0 && textMetrics.actualBoundingBoxRight === 0
-        ? textMetrics.width
-        : 0,
-    ),
+  const lineMetrics = browserFontLineMetrics(measureCtx, fontSize);
+  const horizontalOverhang = Math.max(0, Math.ceil(textMetrics.actualBoundingBoxLeft || 0));
+  const horizontalExtent = Math.max(
+    textMetrics.width,
+    Math.abs(textMetrics.actualBoundingBoxLeft || 0) + Math.abs(textMetrics.actualBoundingBoxRight || 0),
+    fontSize,
   );
-  const top = Math.ceil(textMetrics.actualBoundingBoxAscent || 0);
-  const bottom = Math.ceil(textMetrics.actualBoundingBoxDescent || 0);
-  const canvasWidth = Math.max(1, rightEdge - leftEdge + horizontalPadding * 2);
-  const canvasHeight = Math.max(1, top + bottom + verticalPadding * 2);
-
-  if (canvasWidth <= horizontalPadding * 2 || canvasHeight <= verticalPadding * 2) return null;
+  const renderPadding = Math.ceil(fontSize);
+  const penX = renderPadding + horizontalOverhang;
+  const baselineY = renderPadding + lineMetrics.ascent;
+  const canvasWidth = Math.max(1, Math.ceil(horizontalExtent + horizontalOverhang + renderPadding * 2));
+  const canvasHeight = Math.max(1, Math.ceil(lineMetrics.ascent + lineMetrics.descent + renderPadding * 2));
 
   const canvas = document.createElement('canvas');
   canvas.width = canvasWidth;
@@ -681,7 +676,7 @@ function renderGlyph(
   ctx.font = `${fontSize}px "${fontFamily}"`;
   ctx.textBaseline = 'alphabetic';
   ctx.fillStyle = color;
-  ctx.fillText(char, horizontalPadding - leftEdge, verticalPadding + top);
+  ctx.fillText(char, penX, baselineY);
 
   const drawn = ctx.getImageData(0, 0, canvas.width, canvas.height);
   let minX = canvas.width;
@@ -704,11 +699,10 @@ function renderGlyph(
   const croppedWidth = maxX - minX + 1;
   const croppedHeight = maxY - minY + 1;
   const cropped = ctx.getImageData(minX, minY, croppedWidth, croppedHeight);
-  const baselineY = verticalPadding + top;
 
   return {
     imageData: cropped,
-    left: leftEdge + minX - horizontalPadding,
+    left: minX - penX,
     top: baselineY - minY,
   };
 }
