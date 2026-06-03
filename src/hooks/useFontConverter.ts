@@ -977,26 +977,12 @@ export function useFontConverter() {
 
       for (const g of glyphs) {
         lines.push(
-          `info face="${fontName}" size=${fontSize} bold=0 italic=0 charset="" unicode=1 stretchH=100 smooth=1 aa=1` +
-          ` padding=${totalPadding},${totalPadding},${totalPadding},${totalPadding} spacing=${spacing},${spacing}`
+          `char id=${g.id} ` +
+          `x=${g.x} y=${g.y} ` +
+          `width=${g.width} height=${g.height} ` +
+          `xoffset=${g.xoffset} yoffset=${g.yoffset} ` +
+          `xadvance=${g.xadvance} page=0 chnl=15`
         );
-        lines.push(
-          `common lineHeight=${lineHeight} base=${base} scaleW=${outputAtlasWidth} scaleH=${outputAtlasHeight} pages=1 packed=0`
-        );
-        lines.push(`page id=0 file="${fontName}_0.png"`);
-        lines.push(`chars count=${glyphs.length}`);
-
-        for (const g of glyphs) {
-          lines.push(
-            `char id=${g.id} ` +
-            `x=${g.x} y=${g.y} ` +
-            `width=${g.width} height=${g.height} ` +
-            `xoffset=${g.xoffset} yoffset=${g.yoffset} ` +
-            `xadvance=${g.xadvance} page=0 chnl=15`
-          );
-        }
-
-        fntContent = lines.join('\n');
       }
 
       const fntContent = lines.join('\n');
