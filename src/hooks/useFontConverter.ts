@@ -377,10 +377,16 @@ function parseSvgViewBox(root: SVGSVGElement): DOMRectReadOnly | null {
   return new DOMRectReadOnly(x, y, width, height);
 }
 
-function isolateSvgGlyph(root: SVGSVGElement, glyphId: number) {
+function isolateSvgGlyph(root: SVGSVGElement, glyphId: number): boolean {
+  const idElements = Array.from(root.querySelectorAll('[id]'));
   const glyphIdAttribute = `glyph${glyphId}`;
-  const glyphElement = Array.from(root.querySelectorAll('[id]')).find(element => element.id === glyphIdAttribute);
-  if (!glyphElement) return;
+  const glyphElement = idElements.find(element => element.id === glyphIdAttribute);
+  if (!glyphElement) {
+    // Some SVG fonts store multiple glyphs in one SVG document. If this
+    // document has glyph-scoped ids but not the requested glyph id, rendering
+    // the whole document produces the full-box artifacts seen in the atlas.
+    return !idElements.some(element => /^glyph\d+$/.test(element.id));
+  }
 
   const wrapper = root.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'g');
   wrapper.appendChild(glyphElement.cloneNode(true));
@@ -389,6 +395,7 @@ function isolateSvgGlyph(root: SVGSVGElement, glyphId: number) {
     if (child.tagName.toLowerCase() !== 'defs') child.remove();
   });
   root.appendChild(wrapper);
+  return true;
 }
 
 function measureSvgArtwork(root: SVGSVGElement, fallbackSize: number): DOMRectReadOnly | null {
@@ -466,7 +473,10 @@ function rasterizeSvgDocument(documentData: SvgGlyphDocument, fontSize: number, 
       return;
     }
 
-    isolateSvgGlyph(root, documentData.glyphId);
+    if (!isolateSvgGlyph(root, documentData.glyphId)) {
+      resolve(null);
+      return;
+    }
 
     if (!root.getAttribute('xmlns')) {
       root.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
@@ -698,14 +708,19 @@ function renderGlyph(
   ctx.fillText(char, penX, baselineY);
 
   const drawn = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const metricBleed = 2;
+  const scanLeft = Math.max(0, Math.floor(penX - Math.max(0, textMetrics.actualBoundingBoxLeft || 0) - metricBleed));
+  const scanTop = Math.max(0, Math.floor(baselineY - Math.max(0, textMetrics.actualBoundingBoxAscent || 0) - metricBleed));
+  const scanRight = Math.min(canvas.width - 1, Math.ceil(penX + Math.max(textMetrics.actualBoundingBoxRight || 0, textMetrics.width) + metricBleed));
+  const scanBottom = Math.min(canvas.height - 1, Math.ceil(baselineY + Math.max(0, textMetrics.actualBoundingBoxDescent || 0) + metricBleed));
   let minX = canvas.width;
   let minY = canvas.height;
   let maxX = -1;
   let maxY = -1;
 
-  for (let y = 0; y < canvas.height; y++) {
-    for (let x = 0; x < canvas.width; x++) {
-      if (drawn.data[(y * canvas.width + x) * 4 + 3] === 0) continue;
+  for (let y = scanTop; y <= scanBottom; y++) {
+    for (let x = scanLeft; x <= scanRight; x++) {
+      if (drawn.data[(y * canvas.width + x) * 4 + 3] <= GLYPH_ALPHA_THRESHOLD) continue;
       minX = Math.min(minX, x);
       minY = Math.min(minY, y);
       maxX = Math.max(maxX, x);
@@ -917,13 +932,13 @@ export function useFontConverter() {
         const bitmap = !missingGlyph && nativeEngine && useNativeColors && !svgDocument
           ? nativeEngine.rasterizeGlyph(glyphId, fontSize, nativeColor)
           : null;
-        const render = missingGlyph
-          ? null
-          : svgDocument
-            ? await rasterizeSvgDocument(svgDocument, fontSize, base)
-            : bitmap
-              ? glyphBitmapToRender(bitmap)
-              : renderGlyph(char, fontFamily, fontSize, color, textMetrics);
+        let render: GlyphRender | null = null;
+        if (!missingGlyph) {
+          if (svgDocument) render = await rasterizeSvgDocument(svgDocument, fontSize, base);
+          render ??= bitmap
+            ? glyphBitmapToRender(bitmap)
+            : renderGlyph(char, fontFamily, fontSize, color, textMetrics);
+        }
         const xadvance = referenceGlyph
           ? referenceGlyph.xadvance
           : missingGlyph
