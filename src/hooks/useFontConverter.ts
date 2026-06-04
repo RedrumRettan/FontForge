@@ -25,6 +25,8 @@ interface ReferenceFntLayout {
 interface ReferenceGlyphPlacement {
   insetX: number;
   insetY: number;
+  width: number;
+  height: number;
 }
 
 interface FontTableRecord {
@@ -191,6 +193,22 @@ function readGlyphFromCmapFormat0(view: DataView, subtableStart: number, codepoi
   return view.getUint8(subtableStart + 6 + codepoint);
 }
 
+function readGlyphFromCmapFormat6(view: DataView, subtableStart: number, codepoint: number): number | null {
+  if (codepoint < 0 || codepoint > 0xffff || subtableStart + 10 > view.byteLength) return null;
+
+  const length = view.getUint16(subtableStart + 2);
+  const subtableEnd = subtableStart + length;
+  if (subtableEnd > view.byteLength) return null;
+
+  const firstCode = view.getUint16(subtableStart + 6);
+  const entryCount = view.getUint16(subtableStart + 8);
+  if (codepoint < firstCode || codepoint >= firstCode + entryCount) return null;
+
+  const glyphOffset = subtableStart + 10 + (codepoint - firstCode) * 2;
+  if (glyphOffset + 2 > subtableEnd) return null;
+  return view.getUint16(glyphOffset);
+}
+
 function readGlyphFromCmapFormat4(view: DataView, subtableStart: number, codepoint: number): number | null {
   if (codepoint < 0 || codepoint > 0xffff || subtableStart + 16 > view.byteLength) return null;
 
@@ -291,6 +309,7 @@ function resolveGlyphIdsFromCmap(fontData: Uint8Array, codepoints: number[]): nu
     for (const subtable of subtables) {
       let glyphId: number | null = null;
       if (subtable.format === 12) glyphId = readGlyphFromCmapFormat12(view, subtable.offset, codepoint);
+      if (subtable.format === 6) glyphId = readGlyphFromCmapFormat6(view, subtable.offset, codepoint);
       if (subtable.format === 4) glyphId = readGlyphFromCmapFormat4(view, subtable.offset, codepoint);
       if (subtable.format === 0) glyphId = readGlyphFromCmapFormat0(view, subtable.offset, codepoint);
       if (glyphId !== null) return glyphId;
@@ -358,10 +377,16 @@ function parseSvgViewBox(root: SVGSVGElement): DOMRectReadOnly | null {
   return new DOMRectReadOnly(x, y, width, height);
 }
 
-function isolateSvgGlyph(root: SVGSVGElement, glyphId: number) {
+function isolateSvgGlyph(root: SVGSVGElement, glyphId: number): boolean {
+  const idElements = Array.from(root.querySelectorAll('[id]'));
   const glyphIdAttribute = `glyph${glyphId}`;
-  const glyphElement = Array.from(root.querySelectorAll('[id]')).find(element => element.id === glyphIdAttribute);
-  if (!glyphElement) return;
+  const glyphElement = idElements.find(element => element.id === glyphIdAttribute);
+  if (!glyphElement) {
+    // Some SVG fonts store multiple glyphs in one SVG document. If this
+    // document has glyph-scoped ids but not the requested glyph id, rendering
+    // the whole document produces the full-box artifacts seen in the atlas.
+    return !idElements.some(element => /^glyph\d+$/.test(element.id));
+  }
 
   const wrapper = root.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'g');
   wrapper.appendChild(glyphElement.cloneNode(true));
@@ -370,6 +395,7 @@ function isolateSvgGlyph(root: SVGSVGElement, glyphId: number) {
     if (child.tagName.toLowerCase() !== 'defs') child.remove();
   });
   root.appendChild(wrapper);
+  return true;
 }
 
 function measureSvgArtwork(root: SVGSVGElement, fallbackSize: number): DOMRectReadOnly | null {
@@ -400,6 +426,8 @@ function measureSvgArtwork(root: SVGSVGElement, fallbackSize: number): DOMRectRe
   return parseSvgViewBox(root);
 }
 
+const GLYPH_ALPHA_THRESHOLD = 8;
+
 function cropTransparentPixels(imageData: ImageData, left = 0, top = 0): GlyphRender | null {
   const { data, width, height } = imageData;
   let minX = width;
@@ -409,7 +437,7 @@ function cropTransparentPixels(imageData: ImageData, left = 0, top = 0): GlyphRe
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      if (data[(y * width + x) * 4 + 3] === 0) continue;
+      if (data[(y * width + x) * 4 + 3] <= GLYPH_ALPHA_THRESHOLD) continue;
       minX = Math.min(minX, x);
       minY = Math.min(minY, y);
       maxX = Math.max(maxX, x);
@@ -445,7 +473,10 @@ function rasterizeSvgDocument(documentData: SvgGlyphDocument, fontSize: number, 
       return;
     }
 
-    isolateSvgGlyph(root, documentData.glyphId);
+    if (!isolateSvgGlyph(root, documentData.glyphId)) {
+      resolve(null);
+      return;
+    }
 
     if (!root.getAttribute('xmlns')) {
       root.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
@@ -617,14 +648,17 @@ function drawNormalizedGlyphToRect(
 
   sourceCtx.putImageData(sourceImage, 0, 0);
 
-  const scale = Math.min(target.width / normalized.textureWidth, target.height / normalized.textureHeight);
-  const drawWidth = Math.max(1, Math.round(normalized.textureWidth * scale));
-  const drawHeight = Math.max(1, Math.round(normalized.textureHeight * scale));
+  // Reference .fnt rectangles can have a very different aspect ratio from the
+  // replacement glyph. Use one locked scale based on the smaller axis fit so
+  // both axes are resized together instead of independently stretching letters.
+  const lockedScale = Math.min(target.width / normalized.textureWidth, target.height / normalized.textureHeight);
+  const drawWidth = Math.max(1, Math.round(normalized.textureWidth * lockedScale));
+  const drawHeight = Math.max(1, Math.round(normalized.textureHeight * lockedScale));
   const insetX = Math.round((target.width - drawWidth) / 2);
   const insetY = Math.round((target.height - drawHeight) / 2);
 
   ctx.drawImage(source, target.x + insetX, target.y + insetY, drawWidth, drawHeight);
-  return { insetX, insetY };
+  return { insetX, insetY, width: drawWidth, height: drawHeight };
 }
 
 function colorToRgbaU32(color: string): number {
@@ -650,27 +684,60 @@ function renderGlyph(
   measureCtx.font = `${fontSize}px "${fontFamily}"`;
   measureCtx.textBaseline = 'alphabetic';
   const textMetrics = metrics ?? measureCtx.measureText(char);
-  const leftBearing = Math.ceil(textMetrics.actualBoundingBoxLeft || 0);
-  const rightBearing = Math.ceil(textMetrics.actualBoundingBoxRight || textMetrics.width || 0);
-  const top = Math.ceil(textMetrics.actualBoundingBoxAscent || 0);
-  const bottom = Math.ceil(textMetrics.actualBoundingBoxDescent || 0);
-
-  if (leftBearing + rightBearing <= 0 || top + bottom <= 0) return null;
+  const lineMetrics = browserFontLineMetrics(measureCtx, fontSize);
+  const horizontalOverhang = Math.max(0, Math.ceil(textMetrics.actualBoundingBoxLeft || 0));
+  const horizontalExtent = Math.max(
+    textMetrics.width,
+    Math.abs(textMetrics.actualBoundingBoxLeft || 0) + Math.abs(textMetrics.actualBoundingBoxRight || 0),
+    fontSize,
+  );
+  const renderPadding = Math.ceil(fontSize);
+  const penX = renderPadding + horizontalOverhang;
+  const baselineY = renderPadding + lineMetrics.ascent;
+  const canvasWidth = Math.max(1, Math.ceil(horizontalExtent + horizontalOverhang + renderPadding * 2));
+  const canvasHeight = Math.max(1, Math.ceil(lineMetrics.ascent + lineMetrics.descent + renderPadding * 2));
 
   const canvas = document.createElement('canvas');
-  canvas.width = leftBearing + rightBearing;
-  canvas.height = top + bottom;
+  canvas.width = canvasWidth;
+  canvas.height = canvasHeight;
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.font = `${fontSize}px "${fontFamily}"`;
   ctx.textBaseline = 'alphabetic';
   ctx.fillStyle = color;
-  ctx.fillText(char, leftBearing, top);
+  ctx.fillText(char, penX, baselineY);
+
+  const drawn = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const metricBleed = 2;
+  const scanLeft = Math.max(0, Math.floor(penX - Math.max(0, textMetrics.actualBoundingBoxLeft || 0) - metricBleed));
+  const scanTop = Math.max(0, Math.floor(baselineY - Math.max(0, textMetrics.actualBoundingBoxAscent || 0) - metricBleed));
+  const scanRight = Math.min(canvas.width - 1, Math.ceil(penX + Math.max(textMetrics.actualBoundingBoxRight || 0, textMetrics.width) + metricBleed));
+  const scanBottom = Math.min(canvas.height - 1, Math.ceil(baselineY + Math.max(0, textMetrics.actualBoundingBoxDescent || 0) + metricBleed));
+  let minX = canvas.width;
+  let minY = canvas.height;
+  let maxX = -1;
+  let maxY = -1;
+
+  for (let y = scanTop; y <= scanBottom; y++) {
+    for (let x = scanLeft; x <= scanRight; x++) {
+      if (drawn.data[(y * canvas.width + x) * 4 + 3] <= GLYPH_ALPHA_THRESHOLD) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+
+  if (maxX < minX || maxY < minY) return null;
+
+  const croppedWidth = maxX - minX + 1;
+  const croppedHeight = maxY - minY + 1;
+  const cropped = ctx.getImageData(minX, minY, croppedWidth, croppedHeight);
 
   return {
-    imageData: ctx.getImageData(0, 0, canvas.width, canvas.height),
-    left: -leftBearing,
-    top,
+    imageData: cropped,
+    left: minX - penX,
+    top: baselineY - minY,
   };
 }
 
@@ -819,6 +886,7 @@ export function useFontConverter() {
         : loadedFont?.data
           ? resolveGlyphIdsFromCmap(loadedFont.data, codepoints)
           : [];
+      const hasResolvedGlyphCoverage = nativeGlyphIds.some(glyphId => glyphId !== 0);
       const nativeColor = colorToRgbaU32(color);
 
       const active = await ensureFontReady(fontFamily, fontSize);
@@ -853,25 +921,33 @@ export function useFontConverter() {
         const id = char.codePointAt(0) ?? 0;
         const glyphId = nativeGlyphIds[index] ?? 0;
         const textMetrics = mCtx.measureText(char);
-        const svgDocument = useNativeColors && loadedFont?.tableInfo.hasSVG
+        const referenceGlyph = referenceLayout?.glyphMap.get(id);
+        const missingGlyph = hasResolvedGlyphCoverage && id !== 0 && glyphId === 0;
+        if (missingGlyph) {
+          console.warn(`[FontForge] '${char}' (U+${id.toString(16).toUpperCase()}) is missing from the font cmap; skipping fallback glyph in atlas`);
+        }
+        const svgDocument = !missingGlyph && useNativeColors && loadedFont?.tableInfo.hasSVG
           ? await extractSvgDocument(loadedFont.data, glyphId)
           : null;
-        const bitmap = nativeEngine && useNativeColors && !svgDocument
+        const bitmap = !missingGlyph && nativeEngine && useNativeColors && !svgDocument
           ? nativeEngine.rasterizeGlyph(glyphId, fontSize, nativeColor)
           : null;
-        const render = svgDocument
-          ? await rasterizeSvgDocument(svgDocument, fontSize, base)
-          : bitmap
+        let render: GlyphRender | null = null;
+        if (!missingGlyph) {
+          if (svgDocument) render = await rasterizeSvgDocument(svgDocument, fontSize, base);
+          render ??= bitmap
             ? glyphBitmapToRender(bitmap)
             : renderGlyph(char, fontFamily, fontSize, color, textMetrics);
-        const referenceGlyph = referenceLayout?.glyphMap.get(id);
+        }
         const xadvance = referenceGlyph
           ? referenceGlyph.xadvance
-          : bitmap
-            ? Math.round(bitmap.advance_width)
-            : nativeEngine
-              ? Math.round(nativeEngine.glyphMetrics(glyphId, fontSize).advance_width)
-              : Math.round(textMetrics.width);
+          : missingGlyph
+            ? 0
+            : bitmap
+              ? Math.round(bitmap.advance_width)
+              : nativeEngine
+                ? Math.round(nativeEngine.glyphMetrics(glyphId, fontSize).advance_width)
+                : Math.round(textMetrics.width);
 
         entries.push({
           char,
@@ -903,8 +979,12 @@ export function useFontConverter() {
 
           glyphs.push({
             ...referenceGlyph,
-            xoffset: normalized ? normalized.xoffset - (placement?.insetX ?? 0) : referenceGlyph.xoffset,
-            yoffset: normalized ? normalized.yoffset - (placement?.insetY ?? 0) : referenceGlyph.yoffset,
+            x: placement ? referenceGlyph.x + placement.insetX : referenceGlyph.x,
+            y: placement ? referenceGlyph.y + placement.insetY : referenceGlyph.y,
+            width: placement?.width ?? referenceGlyph.width,
+            height: placement?.height ?? referenceGlyph.height,
+            xoffset: normalized ? normalized.xoffset : referenceGlyph.xoffset,
+            yoffset: normalized ? normalized.yoffset : referenceGlyph.yoffset,
             xadvance,
           });
         }
@@ -968,26 +1048,12 @@ export function useFontConverter() {
 
       for (const g of glyphs) {
         lines.push(
-          `info face="${fontName}" size=${fontSize} bold=0 italic=0 charset="" unicode=1 stretchH=100 smooth=1 aa=1` +
-          ` padding=${totalPadding},${totalPadding},${totalPadding},${totalPadding} spacing=${spacing},${spacing}`
+          `char id=${g.id} ` +
+          `x=${g.x} y=${g.y} ` +
+          `width=${g.width} height=${g.height} ` +
+          `xoffset=${g.xoffset} yoffset=${g.yoffset} ` +
+          `xadvance=${g.xadvance} page=0 chnl=15`
         );
-        lines.push(
-          `common lineHeight=${lineHeight} base=${base} scaleW=${outputAtlasWidth} scaleH=${outputAtlasHeight} pages=1 packed=0`
-        );
-        lines.push(`page id=0 file="${fontName}_0.png"`);
-        lines.push(`chars count=${glyphs.length}`);
-
-        for (const g of glyphs) {
-          lines.push(
-            `char id=${g.id} ` +
-            `x=${g.x} y=${g.y} ` +
-            `width=${g.width} height=${g.height} ` +
-            `xoffset=${g.xoffset} yoffset=${g.yoffset} ` +
-            `xadvance=${g.xadvance} page=0 chnl=15`
-          );
-        }
-
-        fntContent = lines.join('\n');
       }
 
       const fntContent = lines.join('\n');
