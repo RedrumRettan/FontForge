@@ -193,6 +193,22 @@ function readGlyphFromCmapFormat0(view: DataView, subtableStart: number, codepoi
   return view.getUint8(subtableStart + 6 + codepoint);
 }
 
+function readGlyphFromCmapFormat6(view: DataView, subtableStart: number, codepoint: number): number | null {
+  if (codepoint < 0 || codepoint > 0xffff || subtableStart + 10 > view.byteLength) return null;
+
+  const length = view.getUint16(subtableStart + 2);
+  const subtableEnd = subtableStart + length;
+  if (subtableEnd > view.byteLength) return null;
+
+  const firstCode = view.getUint16(subtableStart + 6);
+  const entryCount = view.getUint16(subtableStart + 8);
+  if (codepoint < firstCode || codepoint >= firstCode + entryCount) return null;
+
+  const glyphOffset = subtableStart + 10 + (codepoint - firstCode) * 2;
+  if (glyphOffset + 2 > subtableEnd) return null;
+  return view.getUint16(glyphOffset);
+}
+
 function readGlyphFromCmapFormat4(view: DataView, subtableStart: number, codepoint: number): number | null {
   if (codepoint < 0 || codepoint > 0xffff || subtableStart + 16 > view.byteLength) return null;
 
@@ -293,6 +309,7 @@ function resolveGlyphIdsFromCmap(fontData: Uint8Array, codepoints: number[]): nu
     for (const subtable of subtables) {
       let glyphId: number | null = null;
       if (subtable.format === 12) glyphId = readGlyphFromCmapFormat12(view, subtable.offset, codepoint);
+      if (subtable.format === 6) glyphId = readGlyphFromCmapFormat6(view, subtable.offset, codepoint);
       if (subtable.format === 4) glyphId = readGlyphFromCmapFormat4(view, subtable.offset, codepoint);
       if (subtable.format === 0) glyphId = readGlyphFromCmapFormat0(view, subtable.offset, codepoint);
       if (glyphId !== null) return glyphId;
@@ -402,6 +419,8 @@ function measureSvgArtwork(root: SVGSVGElement, fallbackSize: number): DOMRectRe
   return parseSvgViewBox(root);
 }
 
+const GLYPH_ALPHA_THRESHOLD = 8;
+
 function cropTransparentPixels(imageData: ImageData, left = 0, top = 0): GlyphRender | null {
   const { data, width, height } = imageData;
   let minX = width;
@@ -411,7 +430,7 @@ function cropTransparentPixels(imageData: ImageData, left = 0, top = 0): GlyphRe
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      if (data[(y * width + x) * 4 + 3] === 0) continue;
+      if (data[(y * width + x) * 4 + 3] <= GLYPH_ALPHA_THRESHOLD) continue;
       minX = Math.min(minX, x);
       minY = Math.min(minY, y);
       maxX = Math.max(maxX, x);
@@ -852,6 +871,7 @@ export function useFontConverter() {
         : loadedFont?.data
           ? resolveGlyphIdsFromCmap(loadedFont.data, codepoints)
           : [];
+      const hasResolvedGlyphCoverage = nativeGlyphIds.some(glyphId => glyphId !== 0);
       const nativeColor = colorToRgbaU32(color);
 
       const active = await ensureFontReady(fontFamily, fontSize);
@@ -886,25 +906,33 @@ export function useFontConverter() {
         const id = char.codePointAt(0) ?? 0;
         const glyphId = nativeGlyphIds[index] ?? 0;
         const textMetrics = mCtx.measureText(char);
-        const svgDocument = useNativeColors && loadedFont?.tableInfo.hasSVG
+        const referenceGlyph = referenceLayout?.glyphMap.get(id);
+        const missingGlyph = hasResolvedGlyphCoverage && id !== 0 && glyphId === 0;
+        if (missingGlyph) {
+          console.warn(`[FontForge] '${char}' (U+${id.toString(16).toUpperCase()}) is missing from the font cmap; skipping fallback glyph in atlas`);
+        }
+        const svgDocument = !missingGlyph && useNativeColors && loadedFont?.tableInfo.hasSVG
           ? await extractSvgDocument(loadedFont.data, glyphId)
           : null;
-        const bitmap = nativeEngine && useNativeColors && !svgDocument
+        const bitmap = !missingGlyph && nativeEngine && useNativeColors && !svgDocument
           ? nativeEngine.rasterizeGlyph(glyphId, fontSize, nativeColor)
           : null;
-        const render = svgDocument
-          ? await rasterizeSvgDocument(svgDocument, fontSize, base)
-          : bitmap
-            ? glyphBitmapToRender(bitmap)
-            : renderGlyph(char, fontFamily, fontSize, color, textMetrics);
-        const referenceGlyph = referenceLayout?.glyphMap.get(id);
+        const render = missingGlyph
+          ? null
+          : svgDocument
+            ? await rasterizeSvgDocument(svgDocument, fontSize, base)
+            : bitmap
+              ? glyphBitmapToRender(bitmap)
+              : renderGlyph(char, fontFamily, fontSize, color, textMetrics);
         const xadvance = referenceGlyph
           ? referenceGlyph.xadvance
-          : bitmap
-            ? Math.round(bitmap.advance_width)
-            : nativeEngine
-              ? Math.round(nativeEngine.glyphMetrics(glyphId, fontSize).advance_width)
-              : Math.round(textMetrics.width);
+          : missingGlyph
+            ? 0
+            : bitmap
+              ? Math.round(bitmap.advance_width)
+              : nativeEngine
+                ? Math.round(nativeEngine.glyphMetrics(glyphId, fontSize).advance_width)
+                : Math.round(textMetrics.width);
 
         entries.push({
           char,
