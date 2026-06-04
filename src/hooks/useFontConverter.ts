@@ -698,19 +698,14 @@ function renderGlyph(
   ctx.fillText(char, penX, baselineY);
 
   const drawn = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const metricBleed = 2;
-  const scanLeft = Math.max(0, Math.floor(penX - Math.max(0, textMetrics.actualBoundingBoxLeft || 0) - metricBleed));
-  const scanTop = Math.max(0, Math.floor(baselineY - Math.max(0, textMetrics.actualBoundingBoxAscent || 0) - metricBleed));
-  const scanRight = Math.min(canvas.width - 1, Math.ceil(penX + Math.max(textMetrics.actualBoundingBoxRight || 0, textMetrics.width) + metricBleed));
-  const scanBottom = Math.min(canvas.height - 1, Math.ceil(baselineY + Math.max(0, textMetrics.actualBoundingBoxDescent || 0) + metricBleed));
   let minX = canvas.width;
   let minY = canvas.height;
   let maxX = -1;
   let maxY = -1;
 
-  for (let y = scanTop; y <= scanBottom; y++) {
-    for (let x = scanLeft; x <= scanRight; x++) {
-      if (drawn.data[(y * canvas.width + x) * 4 + 3] <= GLYPH_ALPHA_THRESHOLD) continue;
+  for (let y = 0; y < canvas.height; y++) {
+    for (let x = 0; x < canvas.width; x++) {
+      if (drawn.data[(y * canvas.width + x) * 4 + 3] === 0) continue;
       minX = Math.min(minX, x);
       minY = Math.min(minY, y);
       maxX = Math.max(maxX, x);
