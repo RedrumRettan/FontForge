@@ -741,6 +741,56 @@ function renderGlyph(
   };
 }
 
+interface AtlasRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+function uniqueChars(chars: string[]): string[] {
+  return Array.from(new Set(chars));
+}
+
+function glyphIdSet(chars: string): Set<number> {
+  return new Set(Array.from(chars).map(char => char.codePointAt(0) ?? 0));
+}
+
+function atlasRectsOverlap(a: AtlasRect, b: AtlasRect): boolean {
+  return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+}
+
+function findAtlasPlacement(
+  width: number,
+  height: number,
+  atlasWidth: number,
+  atlasHeight: number,
+  occupied: AtlasRect[],
+  border: number,
+  spacing: number,
+): AtlasRect | null {
+  const start = Math.max(0, border);
+  const endX = atlasWidth - width - start;
+  const endY = atlasHeight - height - start;
+  if (endX < start || endY < start) return null;
+
+  for (let y = start; y <= endY; y++) {
+    for (let x = start; x <= endX; x++) {
+      const candidate = {
+        x,
+        y,
+        width: width + spacing,
+        height: height + spacing,
+      };
+      if (!occupied.some(rect => atlasRectsOverlap(candidate, rect))) {
+        return { x, y, width, height };
+      }
+    }
+  }
+
+  return null;
+}
+
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
 export function useFontConverter() {
@@ -872,9 +922,22 @@ export function useFontConverter() {
       const { fontSize, padding, extrude, spacing, color } = config;
       const referenceLayout = referenceFnt;
       const useNativeColors = config.useNativeColors && !!loadedFont?.isColorFont;
+      const configuredChars = Array.from(CHARSETS[config.charset] ?? config.charset);
+      const selectedReferenceGlyphIds = referenceLayout
+        ? config.referenceGlyphs.trim()
+          ? glyphIdSet(config.referenceGlyphs)
+          : new Set(referenceLayout.glyphs.map(glyph => glyph.id))
+        : new Set<number>();
       const charList = referenceLayout
-        ? referenceLayout.glyphs.map(glyph => glyph.char)
-        : Array.from(CHARSETS[config.charset] ?? config.charset);
+        ? config.referenceGlyphs.trim()
+          ? uniqueChars([
+            ...configuredChars,
+            ...referenceLayout.glyphs
+              .filter(glyph => selectedReferenceGlyphIds.has(glyph.id))
+              .map(glyph => glyph.char),
+          ])
+          : referenceLayout.glyphs.map(glyph => glyph.char)
+        : configuredChars;
       const outputAtlasWidth = referenceLayout?.scaleW ?? config.atlasWidth;
       const outputAtlasHeight = referenceLayout?.scaleH ?? config.atlasHeight;
       const nativeEngine = loadedFont?.data
@@ -968,10 +1031,63 @@ export function useFontConverter() {
       actx.clearRect(0, 0, outputAtlasWidth, outputAtlasHeight);
 
       const glyphs: CharGlyph[] = [];
+      const occupiedRects: AtlasRect[] = referenceLayout
+        ? referenceLayout.glyphs
+          .filter(glyph => selectedReferenceGlyphIds.has(glyph.id))
+          .map(glyph => ({
+            x: glyph.x,
+            y: glyph.y,
+            width: glyph.width + spacing,
+            height: glyph.height + spacing,
+          }))
+        : [];
+
+      const packNormalGlyph = ({ char, id, normalized, xadvance }: RenderEntry) => {
+        if (!normalized) {
+          glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
+          return;
+        }
+
+        const gw = normalized.imageData.width;
+        const gh = normalized.imageData.height;
+        const placement = findAtlasPlacement(gw, gh, outputAtlasWidth, outputAtlasHeight, occupiedRects, totalPadding, spacing);
+        if (!placement) {
+          console.warn(`[FontForge] atlas full — '${char}' skipped`);
+          glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
+          return;
+        }
+
+        actx.putImageData(normalized.imageData, placement.x, placement.y);
+        occupiedRects.push({
+          x: placement.x,
+          y: placement.y,
+          width: gw + spacing,
+          height: gh + spacing,
+        });
+
+        glyphs.push({
+          id,
+          char,
+          x: placement.x + normalized.textureX,
+          y: placement.y + normalized.textureY,
+          width: normalized.textureWidth,
+          height: normalized.textureHeight,
+          xoffset: normalized.xoffset,
+          yoffset: normalized.yoffset,
+          xadvance,
+        });
+      };
+
       if (referenceLayout) {
-        for (const { id, normalized, xadvance } of entries) {
+        for (const entry of entries) {
+          const { id, normalized, xadvance } = entry;
           const referenceGlyph = referenceLayout.glyphMap.get(id);
-          if (!referenceGlyph) continue;
+          const useReferenceGlyph = !!referenceGlyph && selectedReferenceGlyphIds.has(id);
+
+          if (!useReferenceGlyph) {
+            packNormalGlyph(entry);
+            continue;
+          }
 
           const placement = normalized
             ? drawNormalizedGlyphToRect(actx, normalized, referenceGlyph)
@@ -989,47 +1105,8 @@ export function useFontConverter() {
           });
         }
       } else {
-        let cx = totalPadding;
-        let cy = totalPadding;
-        let rowH = lineHeight + totalPadding * 2;
-
-        for (const { char, id, normalized, xadvance } of entries) {
-          if (!normalized) {
-            glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
-            continue;
-          }
-
-          const gw = normalized.imageData.width;
-          const gh = normalized.imageData.height;
-
-          if (cx + gw > outputAtlasWidth - totalPadding) {
-            cx = totalPadding;
-            cy += rowH + spacing;
-            rowH = lineHeight + totalPadding * 2;
-          }
-
-          if (cy + gh > outputAtlasHeight) {
-            console.warn(`[FontForge] atlas full — '${char}' skipped`);
-            glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
-            continue;
-          }
-
-          actx.putImageData(normalized.imageData, cx, cy);
-
-          glyphs.push({
-            id,
-            char,
-            x: cx + normalized.textureX,
-            y: cy + normalized.textureY,
-            width: normalized.textureWidth,
-            height: normalized.textureHeight,
-            xoffset: normalized.xoffset,
-            yoffset: normalized.yoffset,
-            xadvance,
-          });
-
-          cx += gw + spacing;
-          rowH = Math.max(rowH, gh);
+        for (const entry of entries) {
+          packNormalGlyph(entry);
         }
       }
 

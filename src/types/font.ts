@@ -34,6 +34,7 @@ export interface FontConversionConfig {
   antialiasing: boolean;
   color: string;
   useNativeColors: boolean;
+  referenceGlyphs: string;
 }
 
 export interface ConversionResult {
@@ -56,6 +57,7 @@ export const DEFAULT_CONFIG: FontConversionConfig = {
   antialiasing: true,
   color: '#ffffff',
   useNativeColors: false,
+  referenceGlyphs: '',
 };
 
 export const CHARSETS: Record<string, string> = {
