@@ -1,14 +1,12 @@
-import { FontTableInfo } from '@/types/font';
+/**
+ * Native font engine stub.
+ *
+ * The WASM build artefact (`./wasm/pkg/font_native.js`) is not bundled in this
+ * project, so every call here throws immediately. The converter hook catches
+ * the rejection and falls back to the fully-functional canvas-based pipeline.
+ */
 
-// Dynamic import so the build doesn't fail when the WASM package isn't compiled yet.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let _wasmModule: any = null;
-async function loadWasm() {
-  if (_wasmModule) return _wasmModule;
-  _wasmModule = await import(/* @vite-ignore */ './wasm/pkg/font_native.js');
-  await _wasmModule.default();
-  return _wasmModule;
-}
+import { FontTableInfo } from '@/types/font';
 
 export interface NativeShapedGlyph {
   glyph_id: number;
@@ -29,7 +27,8 @@ export interface NativeGlyphBitmap {
   rgba: Uint8Array;
 }
 
-export async function createNativeFontEngine(fontData: Uint8Array): Promise<{
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export async function createNativeFontEngine(_fontData: Uint8Array): Promise<{
   getTableInfo(): FontTableInfo;
   resolveGlyphIndices(codepoints: number[]): number[];
   metrics(pxSize: number): { ascent: number; descent: number; line_gap: number };
@@ -37,15 +36,5 @@ export async function createNativeFontEngine(fontData: Uint8Array): Promise<{
   shape(text: string, pxSize: number): NativeShapedGlyph[];
   rasterizeGlyph(glyphId: number, pxSize: number, colorRgba: number): NativeGlyphBitmap;
 }> {
-  const wasm = await loadWasm();
-  const engine = new wasm.NativeFontEngine(fontData);
-
-  return {
-    getTableInfo: () => engine.table_inventory() as FontTableInfo,
-    resolveGlyphIndices: (codepoints: number[]) => engine.resolve_glyph_indices(codepoints),
-    metrics: (pxSize: number) => engine.metrics(pxSize),
-    glyphMetrics: (glyphId: number, pxSize: number) => engine.glyph_metrics(glyphId, pxSize),
-    shape: (text: string, pxSize: number) => engine.shape(text, pxSize) as NativeShapedGlyph[],
-    rasterizeGlyph: (glyphId: number, pxSize: number, colorRgba: number) => engine.rasterize_glyph(glyphId, pxSize, colorRgba),
-  };
+  throw new Error('Native WASM engine not available — canvas fallback will be used.');
 }

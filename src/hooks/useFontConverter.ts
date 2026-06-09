@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import { FontConversionConfig, ConversionResult, CharGlyph, CHARSETS, FontTableInfo, KerningPair } from '@/types/font';
+import { FontConversionConfig, ConversionResult, CharGlyph, CHARSETS, FontTableInfo } from '@/types/font';
 import { createNativeFontEngine, NativeGlyphBitmap } from '@/native/fontEngine';
 
 interface LoadedFont {
@@ -672,55 +672,6 @@ function colorToRgbaU32(color: string): number {
   return (((r << 24) | (g << 16) | (b << 8) | a) >>> 0);
 }
 
-function enableFontKerning(ctx: CanvasRenderingContext2D) {
-  if ('fontKerning' in ctx) {
-    (ctx as CanvasRenderingContext2D & { fontKerning: CanvasFontKerning }).fontKerning = 'normal';
-  }
-}
-
-function nativeTextAdvance(nativeEngine: NativeFontEngineHandle, text: string, fontSize: number): number {
-  return nativeEngine
-    .shape(text, fontSize)
-    .reduce((total, glyph) => total + glyph.x_advance, 0);
-}
-
-interface KerningEntrySource {
-  char: string;
-  id: number;
-  xadvance: number;
-}
-
-function calculateKerningPairs(
-  entries: KerningEntrySource[],
-  fontSize: number,
-  measureCtx: CanvasRenderingContext2D,
-  nativeEngine: NativeFontEngineHandle | null,
-): KerningPair[] {
-  const kernings: KerningPair[] = [];
-  const visibleEntries = entries.filter(entry => entry.id > 0);
-
-  for (const first of visibleEntries) {
-    for (const second of visibleEntries) {
-      const pairText = `${first.char}${second.char}`;
-      const amount = Math.round(nativeEngine
-        ? (() => {
-          const shapedPair = nativeEngine.shape(pairText, fontSize);
-          if (shapedPair.length >= 2) {
-            return shapedPair[0].x_advance + shapedPair[1].x_offset - first.xadvance;
-          }
-          return nativeTextAdvance(nativeEngine, pairText, fontSize) - first.xadvance - second.xadvance;
-        })()
-        : measureCtx.measureText(pairText).width - first.xadvance - second.xadvance);
-
-      if (amount !== 0) {
-        kernings.push({ first: first.id, second: second.id, amount });
-      }
-    }
-  }
-
-  return kernings;
-}
-
 function renderGlyph(
   char: string,
   fontFamily: string,
@@ -732,7 +683,6 @@ function renderGlyph(
   const measureCtx = measureCanvas.getContext('2d')!;
   measureCtx.font = `${fontSize}px "${fontFamily}"`;
   measureCtx.textBaseline = 'alphabetic';
-  enableFontKerning(measureCtx);
   const textMetrics = metrics ?? measureCtx.measureText(char);
   const lineMetrics = browserFontLineMetrics(measureCtx, fontSize);
   const horizontalOverhang = Math.max(0, Math.ceil(textMetrics.actualBoundingBoxLeft || 0));
@@ -754,7 +704,6 @@ function renderGlyph(
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.font = `${fontSize}px "${fontFamily}"`;
   ctx.textBaseline = 'alphabetic';
-  enableFontKerning(ctx);
   ctx.fillStyle = color;
   ctx.fillText(char, penX, baselineY);
 
@@ -790,56 +739,6 @@ function renderGlyph(
     left: minX - penX,
     top: baselineY - minY,
   };
-}
-
-interface AtlasRect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-function uniqueChars(chars: string[]): string[] {
-  return Array.from(new Set(chars));
-}
-
-function glyphIdSet(chars: string): Set<number> {
-  return new Set(Array.from(chars).map(char => char.codePointAt(0) ?? 0));
-}
-
-function atlasRectsOverlap(a: AtlasRect, b: AtlasRect): boolean {
-  return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
-}
-
-function findAtlasPlacement(
-  width: number,
-  height: number,
-  atlasWidth: number,
-  atlasHeight: number,
-  occupied: AtlasRect[],
-  border: number,
-  spacing: number,
-): AtlasRect | null {
-  const start = Math.max(0, border);
-  const endX = atlasWidth - width - start;
-  const endY = atlasHeight - height - start;
-  if (endX < start || endY < start) return null;
-
-  for (let y = start; y <= endY; y++) {
-    for (let x = start; x <= endX; x++) {
-      const candidate = {
-        x,
-        y,
-        width: width + spacing,
-        height: height + spacing,
-      };
-      if (!occupied.some(rect => atlasRectsOverlap(candidate, rect))) {
-        return { x, y, width, height };
-      }
-    }
-  }
-
-  return null;
 }
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
@@ -973,22 +872,9 @@ export function useFontConverter() {
       const { fontSize, padding, extrude, spacing, color } = config;
       const referenceLayout = referenceFnt;
       const useNativeColors = config.useNativeColors && !!loadedFont?.isColorFont;
-      const configuredChars = Array.from(CHARSETS[config.charset] ?? config.charset);
-      const selectedReferenceGlyphIds = referenceLayout
-        ? config.referenceGlyphs.trim()
-          ? glyphIdSet(config.referenceGlyphs)
-          : new Set(referenceLayout.glyphs.map(glyph => glyph.id))
-        : new Set<number>();
       const charList = referenceLayout
-        ? config.referenceGlyphs.trim()
-          ? uniqueChars([
-            ...configuredChars,
-            ...referenceLayout.glyphs
-              .filter(glyph => selectedReferenceGlyphIds.has(glyph.id))
-              .map(glyph => glyph.char),
-          ])
-          : referenceLayout.glyphs.map(glyph => glyph.char)
-        : configuredChars;
+        ? referenceLayout.glyphs.map(glyph => glyph.char)
+        : Array.from(CHARSETS[config.charset] ?? config.charset);
       const outputAtlasWidth = referenceLayout?.scaleW ?? config.atlasWidth;
       const outputAtlasHeight = referenceLayout?.scaleH ?? config.atlasHeight;
       const nativeEngine = loadedFont?.data
@@ -1014,7 +900,6 @@ export function useFontConverter() {
       const mCtx = measureCanvas.getContext('2d')!;
       mCtx.font = `${fontSize}px "${fontFamily}"`;
       mCtx.textBaseline = 'alphabetic';
-      enableFontKerning(mCtx);
 
       const fontMetrics = nativeEngine
         ? nativeEngine.metrics(fontSize)
@@ -1054,12 +939,15 @@ export function useFontConverter() {
             ? glyphBitmapToRender(bitmap)
             : renderGlyph(char, fontFamily, fontSize, color, textMetrics);
         }
-        const sourceAdvance = missingGlyph
-          ? 0
-          : nativeEngine
-            ? nativeTextAdvance(nativeEngine, char, fontSize) || nativeEngine.glyphMetrics(glyphId, fontSize).advance_width
-            : textMetrics.width;
-        const xadvance = Math.round(sourceAdvance || referenceGlyph?.xadvance || 0);
+        const xadvance = referenceGlyph
+          ? referenceGlyph.xadvance
+          : missingGlyph
+            ? 0
+            : bitmap
+              ? Math.round(bitmap.advance_width)
+              : nativeEngine
+                ? Math.round(nativeEngine.glyphMetrics(glyphId, fontSize).advance_width)
+                : Math.round(textMetrics.width);
 
         entries.push({
           char,
@@ -1069,10 +957,7 @@ export function useFontConverter() {
         });
       }
 
-      const kernings = calculateKerningPairs(entries, fontSize, mCtx, nativeEngine);
-
       console.log(`[FontForge] lineHeight=${lineHeight} base=${base} (ascent=${fontMetrics.ascent} descent=${fontMetrics.descent} gap=${fontMetrics.line_gap})`);
-      console.log(`[FontForge] kerning pairs=${kernings.length}`);
 
       // ── 2. Pack glyphs into the atlas canvas ──────────────────────────────
 
@@ -1083,63 +968,10 @@ export function useFontConverter() {
       actx.clearRect(0, 0, outputAtlasWidth, outputAtlasHeight);
 
       const glyphs: CharGlyph[] = [];
-      const occupiedRects: AtlasRect[] = referenceLayout
-        ? referenceLayout.glyphs
-          .filter(glyph => selectedReferenceGlyphIds.has(glyph.id))
-          .map(glyph => ({
-            x: glyph.x,
-            y: glyph.y,
-            width: glyph.width + spacing,
-            height: glyph.height + spacing,
-          }))
-        : [];
-
-      const packNormalGlyph = ({ char, id, normalized, xadvance }: RenderEntry) => {
-        if (!normalized) {
-          glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
-          return;
-        }
-
-        const gw = normalized.imageData.width;
-        const gh = normalized.imageData.height;
-        const placement = findAtlasPlacement(gw, gh, outputAtlasWidth, outputAtlasHeight, occupiedRects, totalPadding, spacing);
-        if (!placement) {
-          console.warn(`[FontForge] atlas full — '${char}' skipped`);
-          glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
-          return;
-        }
-
-        actx.putImageData(normalized.imageData, placement.x, placement.y);
-        occupiedRects.push({
-          x: placement.x,
-          y: placement.y,
-          width: gw + spacing,
-          height: gh + spacing,
-        });
-
-        glyphs.push({
-          id,
-          char,
-          x: placement.x + normalized.textureX,
-          y: placement.y + normalized.textureY,
-          width: normalized.textureWidth,
-          height: normalized.textureHeight,
-          xoffset: normalized.xoffset,
-          yoffset: normalized.yoffset,
-          xadvance,
-        });
-      };
-
       if (referenceLayout) {
-        for (const entry of entries) {
-          const { id, normalized, xadvance } = entry;
+        for (const { id, normalized, xadvance } of entries) {
           const referenceGlyph = referenceLayout.glyphMap.get(id);
-          const useReferenceGlyph = !!referenceGlyph && selectedReferenceGlyphIds.has(id);
-
-          if (!useReferenceGlyph) {
-            packNormalGlyph(entry);
-            continue;
-          }
+          if (!referenceGlyph) continue;
 
           const placement = normalized
             ? drawNormalizedGlyphToRect(actx, normalized, referenceGlyph)
@@ -1157,8 +989,47 @@ export function useFontConverter() {
           });
         }
       } else {
-        for (const entry of entries) {
-          packNormalGlyph(entry);
+        let cx = totalPadding;
+        let cy = totalPadding;
+        let rowH = lineHeight + totalPadding * 2;
+
+        for (const { char, id, normalized, xadvance } of entries) {
+          if (!normalized) {
+            glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
+            continue;
+          }
+
+          const gw = normalized.imageData.width;
+          const gh = normalized.imageData.height;
+
+          if (cx + gw > outputAtlasWidth - totalPadding) {
+            cx = totalPadding;
+            cy += rowH + spacing;
+            rowH = lineHeight + totalPadding * 2;
+          }
+
+          if (cy + gh > outputAtlasHeight) {
+            console.warn(`[FontForge] atlas full — '${char}' skipped`);
+            glyphs.push({ id, char, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance });
+            continue;
+          }
+
+          actx.putImageData(normalized.imageData, cx, cy);
+
+          glyphs.push({
+            id,
+            char,
+            x: cx + normalized.textureX,
+            y: cy + normalized.textureY,
+            width: normalized.textureWidth,
+            height: normalized.textureHeight,
+            xoffset: normalized.xoffset,
+            yoffset: normalized.yoffset,
+            xadvance,
+          });
+
+          cx += gw + spacing;
+          rowH = Math.max(rowH, gh);
         }
       }
 
@@ -1185,11 +1056,6 @@ export function useFontConverter() {
         );
       }
 
-      lines.push(`kernings count=${kernings.length}`);
-      for (const kerning of kernings) {
-        lines.push(`kerning first=${kerning.first} second=${kerning.second} amount=${kerning.amount}`);
-      }
-
       const fntContent = lines.join('\n');
 
       const atlasDataUrl = atlas.toDataURL('image/png');
@@ -1197,7 +1063,7 @@ export function useFontConverter() {
       const packed = glyphs.filter(g => g.width > 0).length;
       console.log(`[FontForge] done — ${packed}/${glyphs.length} glyphs packed`);
 
-      setResult({ fntContent, atlasDataUrl, glyphs, kernings, fontName, lineHeight, base });
+      setResult({ fntContent, atlasDataUrl, glyphs, fontName, lineHeight, base });
     } catch (e) {
       console.error('[FontForge] convert error:', e);
       setError('Conversion failed — check the browser console for details.');

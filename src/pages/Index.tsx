@@ -84,10 +84,7 @@ const Index = () => {
     convert(config);
   };
 
-  const referenceGlyphFilter = config.referenceGlyphs.trim();
-  const charCount = referenceFnt && !referenceGlyphFilter
-    ? referenceFnt.glyphs.length
-    : CHARSETS[config.charset]?.length ?? config.charset.length;
+  const charCount = referenceFnt?.glyphs.length ?? CHARSETS[config.charset]?.length ?? config.charset.length;
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -204,28 +201,9 @@ const Index = () => {
                         className="block w-full text-xs text-muted-foreground file:mr-3 file:rounded file:border-0 file:bg-primary file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-primary-foreground hover:file:bg-primary/90"
                       />
                       {referenceFnt && (
-                        <div className="space-y-2">
-                          <p className="text-xs text-primary mono">
-                            {referenceFnt.name}.fnt · {referenceFnt.glyphs.length} chars · {referenceFnt.scaleW}×{referenceFnt.scaleH}
-                          </p>
-                          <div className="space-y-1">
-                            <label className="text-[11px] text-muted-foreground uppercase tracking-wider" htmlFor="reference-glyphs">
-                              Use reference only for these glyphs
-                            </label>
-                            <textarea
-                              id="reference-glyphs"
-                              className="block w-full h-16 rounded-md border border-border bg-background px-3 py-2 mono text-xs text-foreground placeholder:text-muted-foreground resize-none"
-                              placeholder="Leave empty to use the reference for every .fnt glyph, or type glyphs like ABC123!?"
-                              value={config.referenceGlyphs}
-                              onChange={(e) => setConfig(prev => ({ ...prev, referenceGlyphs: e.target.value }))}
-                            />
-                            <p className="text-[11px] text-muted-foreground">
-                              {referenceGlyphFilter
-                                ? `${Array.from(referenceGlyphFilter).length} selected glyphs use reference positions; other configured glyphs are packed normally.`
-                                : 'Empty means the reference .fnt controls every glyph it contains.'}
-                            </p>
-                          </div>
-                        </div>
+                        <p className="text-xs text-primary mono">
+                          {referenceFnt.name}.fnt · {referenceFnt.glyphs.length} chars · {referenceFnt.scaleW}×{referenceFnt.scaleH}
+                        </p>
                       )}
                     </div>
                   </div>

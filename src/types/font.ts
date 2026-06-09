@@ -23,12 +23,6 @@ export interface CharGlyph {
   xadvance: number;
 }
 
-export interface KerningPair {
-  first: number;
-  second: number;
-  amount: number;
-}
-
 export interface FontConversionConfig {
   fontSize: number;
   padding: number;
@@ -40,14 +34,12 @@ export interface FontConversionConfig {
   antialiasing: boolean;
   color: string;
   useNativeColors: boolean;
-  referenceGlyphs: string;
 }
 
 export interface ConversionResult {
   fntContent: string;
   atlasDataUrl: string;
   glyphs: CharGlyph[];
-  kernings: KerningPair[];
   fontName: string;
   lineHeight: number;
   base: number;
@@ -64,7 +56,6 @@ export const DEFAULT_CONFIG: FontConversionConfig = {
   antialiasing: true,
   color: '#ffffff',
   useNativeColors: false,
-  referenceGlyphs: '',
 };
 
 export const CHARSETS: Record<string, string> = {
