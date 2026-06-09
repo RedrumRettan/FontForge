@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import { FontConversionConfig, ConversionResult, CharGlyph, CHARSETS, FontTableInfo } from '@/types/font';
+import { FontConversionConfig, ConversionResult, CharGlyph, CHARSETS, FontTableInfo, KerningPair } from '@/types/font';
 import { createNativeFontEngine, NativeGlyphBitmap } from '@/native/fontEngine';
 
 interface LoadedFont {
@@ -672,6 +672,55 @@ function colorToRgbaU32(color: string): number {
   return (((r << 24) | (g << 16) | (b << 8) | a) >>> 0);
 }
 
+function enableFontKerning(ctx: CanvasRenderingContext2D) {
+  if ('fontKerning' in ctx) {
+    (ctx as CanvasRenderingContext2D & { fontKerning: CanvasFontKerning }).fontKerning = 'normal';
+  }
+}
+
+function nativeTextAdvance(nativeEngine: NativeFontEngineHandle, text: string, fontSize: number): number {
+  return nativeEngine
+    .shape(text, fontSize)
+    .reduce((total, glyph) => total + glyph.x_advance, 0);
+}
+
+interface KerningEntrySource {
+  char: string;
+  id: number;
+  xadvance: number;
+}
+
+function calculateKerningPairs(
+  entries: KerningEntrySource[],
+  fontSize: number,
+  measureCtx: CanvasRenderingContext2D,
+  nativeEngine: NativeFontEngineHandle | null,
+): KerningPair[] {
+  const kernings: KerningPair[] = [];
+  const visibleEntries = entries.filter(entry => entry.id > 0);
+
+  for (const first of visibleEntries) {
+    for (const second of visibleEntries) {
+      const pairText = `${first.char}${second.char}`;
+      const amount = Math.round(nativeEngine
+        ? (() => {
+          const shapedPair = nativeEngine.shape(pairText, fontSize);
+          if (shapedPair.length >= 2) {
+            return shapedPair[0].x_advance + shapedPair[1].x_offset - first.xadvance;
+          }
+          return nativeTextAdvance(nativeEngine, pairText, fontSize) - first.xadvance - second.xadvance;
+        })()
+        : measureCtx.measureText(pairText).width - first.xadvance - second.xadvance);
+
+      if (amount !== 0) {
+        kernings.push({ first: first.id, second: second.id, amount });
+      }
+    }
+  }
+
+  return kernings;
+}
+
 function renderGlyph(
   char: string,
   fontFamily: string,
@@ -683,6 +732,7 @@ function renderGlyph(
   const measureCtx = measureCanvas.getContext('2d')!;
   measureCtx.font = `${fontSize}px "${fontFamily}"`;
   measureCtx.textBaseline = 'alphabetic';
+  enableFontKerning(measureCtx);
   const textMetrics = metrics ?? measureCtx.measureText(char);
   const lineMetrics = browserFontLineMetrics(measureCtx, fontSize);
   const horizontalOverhang = Math.max(0, Math.ceil(textMetrics.actualBoundingBoxLeft || 0));
@@ -704,6 +754,7 @@ function renderGlyph(
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.font = `${fontSize}px "${fontFamily}"`;
   ctx.textBaseline = 'alphabetic';
+  enableFontKerning(ctx);
   ctx.fillStyle = color;
   ctx.fillText(char, penX, baselineY);
 
@@ -963,6 +1014,7 @@ export function useFontConverter() {
       const mCtx = measureCanvas.getContext('2d')!;
       mCtx.font = `${fontSize}px "${fontFamily}"`;
       mCtx.textBaseline = 'alphabetic';
+      enableFontKerning(mCtx);
 
       const fontMetrics = nativeEngine
         ? nativeEngine.metrics(fontSize)
@@ -1002,15 +1054,12 @@ export function useFontConverter() {
             ? glyphBitmapToRender(bitmap)
             : renderGlyph(char, fontFamily, fontSize, color, textMetrics);
         }
-        const xadvance = referenceGlyph
-          ? referenceGlyph.xadvance
-          : missingGlyph
-            ? 0
-            : bitmap
-              ? Math.round(bitmap.advance_width)
-              : nativeEngine
-                ? Math.round(nativeEngine.glyphMetrics(glyphId, fontSize).advance_width)
-                : Math.round(textMetrics.width);
+        const sourceAdvance = missingGlyph
+          ? 0
+          : nativeEngine
+            ? nativeTextAdvance(nativeEngine, char, fontSize) || nativeEngine.glyphMetrics(glyphId, fontSize).advance_width
+            : textMetrics.width;
+        const xadvance = Math.round(sourceAdvance || referenceGlyph?.xadvance || 0);
 
         entries.push({
           char,
@@ -1020,7 +1069,10 @@ export function useFontConverter() {
         });
       }
 
+      const kernings = calculateKerningPairs(entries, fontSize, mCtx, nativeEngine);
+
       console.log(`[FontForge] lineHeight=${lineHeight} base=${base} (ascent=${fontMetrics.ascent} descent=${fontMetrics.descent} gap=${fontMetrics.line_gap})`);
+      console.log(`[FontForge] kerning pairs=${kernings.length}`);
 
       // ── 2. Pack glyphs into the atlas canvas ──────────────────────────────
 
@@ -1133,6 +1185,11 @@ export function useFontConverter() {
         );
       }
 
+      lines.push(`kernings count=${kernings.length}`);
+      for (const kerning of kernings) {
+        lines.push(`kerning first=${kerning.first} second=${kerning.second} amount=${kerning.amount}`);
+      }
+
       const fntContent = lines.join('\n');
 
       const atlasDataUrl = atlas.toDataURL('image/png');
@@ -1140,7 +1197,7 @@ export function useFontConverter() {
       const packed = glyphs.filter(g => g.width > 0).length;
       console.log(`[FontForge] done — ${packed}/${glyphs.length} glyphs packed`);
 
-      setResult({ fntContent, atlasDataUrl, glyphs, fontName, lineHeight, base });
+      setResult({ fntContent, atlasDataUrl, glyphs, kernings, fontName, lineHeight, base });
     } catch (e) {
       console.error('[FontForge] convert error:', e);
       setError('Conversion failed — check the browser console for details.');

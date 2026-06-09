@@ -1,12 +1,5 @@
-/**
- * Native font engine stub.
- *
- * The WASM build artefact (`./wasm/pkg/font_native.js`) is not bundled in this
- * project, so every call here throws immediately. The converter hook catches
- * the rejection and falls back to the fully-functional canvas-based pipeline.
- */
-
 import { FontTableInfo } from '@/types/font';
+import init, { NativeFontEngine as WasmNativeFontEngine } from './wasm/pkg/font_native.js';
 
 export interface NativeShapedGlyph {
   glyph_id: number;
@@ -27,8 +20,7 @@ export interface NativeGlyphBitmap {
   rgba: Uint8Array;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export async function createNativeFontEngine(_fontData: Uint8Array): Promise<{
+export async function createNativeFontEngine(fontData: Uint8Array): Promise<{
   getTableInfo(): FontTableInfo;
   resolveGlyphIndices(codepoints: number[]): number[];
   metrics(pxSize: number): { ascent: number; descent: number; line_gap: number };
@@ -36,5 +28,15 @@ export async function createNativeFontEngine(_fontData: Uint8Array): Promise<{
   shape(text: string, pxSize: number): NativeShapedGlyph[];
   rasterizeGlyph(glyphId: number, pxSize: number, colorRgba: number): NativeGlyphBitmap;
 }> {
-  throw new Error('Native WASM engine not available — canvas fallback will be used.');
+  await init();
+  const engine = new WasmNativeFontEngine(fontData);
+
+  return {
+    getTableInfo: () => engine.table_inventory() as FontTableInfo,
+    resolveGlyphIndices: (codepoints: number[]) => engine.resolve_glyph_indices(codepoints),
+    metrics: (pxSize: number) => engine.metrics(pxSize),
+    glyphMetrics: (glyphId: number, pxSize: number) => engine.glyph_metrics(glyphId, pxSize),
+    shape: (text: string, pxSize: number) => engine.shape(text, pxSize) as NativeShapedGlyph[],
+    rasterizeGlyph: (glyphId: number, pxSize: number, colorRgba: number) => engine.rasterize_glyph(glyphId, pxSize, colorRgba),
+  };
 }
