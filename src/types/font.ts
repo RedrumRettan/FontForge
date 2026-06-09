@@ -23,6 +23,12 @@ export interface CharGlyph {
   xadvance: number;
 }
 
+export interface KerningPair {
+  first: number;
+  second: number;
+  amount: number;
+}
+
 export interface FontConversionConfig {
   fontSize: number;
   padding: number;
@@ -41,6 +47,7 @@ export interface ConversionResult {
   fntContent: string;
   atlasDataUrl: string;
   glyphs: CharGlyph[];
+  kernings: KerningPair[];
   fontName: string;
   lineHeight: number;
   base: number;

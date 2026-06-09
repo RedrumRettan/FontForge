@@ -54,10 +54,14 @@ export function OutputPanel({ result, onDownloadFnt, onDownloadAtlas, onDownload
       </div>
 
       {/* Stats Row */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-4 gap-3">
         <div className="bg-secondary rounded-lg p-3 border border-border">
           <p className="text-xs text-muted-foreground">Glyphs</p>
           <p className="mono text-lg font-semibold text-primary">{result.glyphs.length}</p>
+        </div>
+        <div className="bg-secondary rounded-lg p-3 border border-border">
+          <p className="text-xs text-muted-foreground">Kernings</p>
+          <p className="mono text-lg font-semibold text-primary">{result.kernings.length}</p>
         </div>
         <div className="bg-secondary rounded-lg p-3 border border-border">
           <p className="text-xs text-muted-foreground">Line Height</p>
