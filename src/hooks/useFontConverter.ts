@@ -920,6 +920,7 @@ export function useFontConverter() {
 
     try {
       const { fontSize, padding, extrude, spacing, color } = config;
+      const xadvanceOffset = Math.round(config.xadvanceOffset ?? 0);
       const referenceLayout = referenceFnt;
       const useNativeColors = config.useNativeColors && !!loadedFont?.isColorFont;
       const configuredChars = Array.from(CHARSETS[config.charset] ?? config.charset);
@@ -1016,7 +1017,7 @@ export function useFontConverter() {
           char,
           id,
           normalized: render ? normalizeGlyphBitmap(render, padding, extrude, base) : null,
-          xadvance,
+          xadvance: xadvance + xadvanceOffset,
         });
       }
 

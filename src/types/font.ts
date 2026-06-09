@@ -35,6 +35,7 @@ export interface FontConversionConfig {
   color: string;
   useNativeColors: boolean;
   referenceGlyphs: string;
+  xadvanceOffset: number;
 }
 
 export interface ConversionResult {
@@ -58,6 +59,7 @@ export const DEFAULT_CONFIG: FontConversionConfig = {
   color: '#ffffff',
   useNativeColors: false,
   referenceGlyphs: '',
+  xadvanceOffset: 0,
 };
 
 export const CHARSETS: Record<string, string> = {

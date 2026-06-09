@@ -228,6 +228,34 @@ export function ConfigPanel({ config, onChange, isColorFont = false }: ConfigPan
         />
       </div>
 
+      {/* xadvance Offset */}
+      <div className="space-y-2">
+        <div className="flex justify-between">
+          <Label className="text-xs text-muted-foreground uppercase tracking-wider">xadvance Offset</Label>
+          <span className={`mono text-xs font-semibold ${config.xadvanceOffset > 0 ? 'text-accent' : config.xadvanceOffset < 0 ? 'text-destructive' : 'text-primary'}`}>
+            {config.xadvanceOffset > 0 ? `+${config.xadvanceOffset}` : config.xadvanceOffset}px
+          </span>
+        </div>
+        <Slider
+          min={-20}
+          max={20}
+          step={1}
+          value={[config.xadvanceOffset]}
+          onValueChange={([v]) => update({ xadvanceOffset: v })}
+        />
+        <div className="flex justify-between text-xs text-muted-foreground">
+          <span>-20px</span>
+          <button
+            onClick={() => update({ xadvanceOffset: 0 })}
+            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Reset
+          </button>
+          <span>+20px</span>
+        </div>
+        <p className="text-xs text-muted-foreground">Adjusts every glyph's advance width for tighter or looser spacing.</p>
+      </div>
+
       {/* Anti-aliasing */}
       <div className="flex items-center justify-between">
         <div>
