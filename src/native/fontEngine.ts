@@ -1,5 +1,14 @@
 import { FontTableInfo } from '@/types/font';
-import init, { NativeFontEngine as WasmNativeFontEngine } from './wasm/pkg/font_native.js';
+
+// Dynamic import so the build doesn't fail when the WASM package isn't compiled yet.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _wasmModule: any = null;
+async function loadWasm() {
+  if (_wasmModule) return _wasmModule;
+  _wasmModule = await import(/* @vite-ignore */ './wasm/pkg/font_native.js');
+  await _wasmModule.default();
+  return _wasmModule;
+}
 
 export interface NativeShapedGlyph {
   glyph_id: number;
@@ -28,8 +37,8 @@ export async function createNativeFontEngine(fontData: Uint8Array): Promise<{
   shape(text: string, pxSize: number): NativeShapedGlyph[];
   rasterizeGlyph(glyphId: number, pxSize: number, colorRgba: number): NativeGlyphBitmap;
 }> {
-  await init();
-  const engine = new WasmNativeFontEngine(fontData);
+  const wasm = await loadWasm();
+  const engine = new wasm.NativeFontEngine(fontData);
 
   return {
     getTableInfo: () => engine.table_inventory() as FontTableInfo,
